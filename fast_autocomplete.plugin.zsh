@@ -1,0 +1,146 @@
+# fast_autocomplete.plugin.zsh
+# Low-latency zsh tab completion via the fast_autocomplete daemon.
+#
+# Plugin managers (zinit, antidote, oh-my-zsh, etc.) source this file.
+# Manual use: `source /path/to/fast_autocomplete.plugin.zsh` in ~/.zshrc
+
+# --------------------------------------------------------------------------- #
+#  Internal helpers                                                             #
+# --------------------------------------------------------------------------- #
+
+# Capture plugin directory at source time — $0 is reliable here but not inside
+# functions called later from subshells (where %x/%0 lose their file context).
+_FA_PLUGIN_DIR=${0:A:h}
+
+# Launch the daemon detached from the current shell.
+# Uses a subshell so the backgrounded process is reparented to PID 1 when the
+# subshell exits — no job-control dependency, works in interactive and
+# non-interactive shells alike.
+_fa_launch() {
+  ( nohup "$1" </dev/null &>/dev/null & )
+}
+
+_fa_socket_path() {
+  if [[ -n ${FAST_AUTOCOMPLETE_SOCKET:-} ]]; then
+    print -- "$FAST_AUTOCOMPLETE_SOCKET"
+    return
+  fi
+  local uid=${UID:-$(id -u)}
+  # TMPDIR on macOS ends with /, so use ${TMPDIR:-/tmp/} to always get a slash.
+  print -- "${TMPDIR:-/tmp/}fast_autocomplete_${uid}.sock"
+}
+
+_fa_bin_path() {
+  # 1. Explicit override.
+  if [[ -n ${FAST_AUTOCOMPLETE_BIN:-} ]]; then
+    print -- "$FAST_AUTOCOMPLETE_BIN"
+    return
+  fi
+  # 2. Binary on PATH.
+  if (( $+commands[fast_autocomplete] )); then
+    print -- "fast_autocomplete"
+    return
+  fi
+  # 3. Sibling target/release/ (running from the source tree).
+  local release_bin=$_FA_PLUGIN_DIR/target/release/fast_autocomplete
+  if [[ -x $release_bin ]]; then
+    print -- "$release_bin"
+  fi
+}
+
+_fa_ensure_daemon() {
+  local sock bin
+  sock=$(_fa_socket_path)
+  [[ -S $sock ]] && return 0
+
+  bin=$(_fa_bin_path)
+  [[ -z $bin ]] && return 1
+
+  _fa_launch "$bin"
+
+  local i
+  for i in {1..10}; do
+    [[ -S $sock ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# Send one request to the daemon and print the raw JSON response.
+# Prefers socat, falls back to nc -U (both support Unix domain sockets).
+_fa_query() {
+  local sock=$1 buffer=$2 cursor=$3 cwd=$4 session=$5
+  local payload
+  payload=$(printf 'BUFFER=%s\nCURSOR=%d\nCWD=%s\nSESSION=%d\n\n' \
+    "$buffer" "$cursor" "$cwd" "$session")
+
+  if (( $+commands[socat] )); then
+    print -- "$payload" | socat -t1 - "UNIX-CONNECT:$sock" 2>/dev/null
+  else
+    # nc -U works on macOS and most Linux distributions.
+    print -- "$payload" | nc -U "$sock" 2>/dev/null
+  fi
+}
+
+# --------------------------------------------------------------------------- #
+#  Completion function                                                          #
+# --------------------------------------------------------------------------- #
+
+# Last completions returned by the daemon; reused on `unchanged:true`.
+typeset -ga _FA_LAST_COMPLETIONS
+
+_fast_autocomplete() {
+  local sock response
+  sock=$(_fa_socket_path)
+
+  if [[ ! -S $sock ]]; then
+    _fa_ensure_daemon || return 1
+    [[ -S $sock ]] || return 1
+  fi
+
+  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$$")
+  [[ -z $response ]] && return 1
+
+  if [[ $response == *'"unchanged":true'* ]]; then
+    (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
+    compadd -Q -U -- "${_FA_LAST_COMPLETIONS[@]}"
+    return 0
+  fi
+
+  local -a completions
+  if (( $+commands[jq] )); then
+    completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
+  else
+    # Minimal fallback for simple completions (no embedded quotes or commas).
+    local raw=${response#*'"completions":['}
+    raw=${raw%%\]*}
+    completions=( ${(s:,:)${raw//\"/}} )
+  fi
+
+  (( ${#completions} == 0 )) && return 1
+
+  _FA_LAST_COMPLETIONS=( "${completions[@]}" )
+
+  # -Q: don't quote special characters zsh would add
+  # -U: skip zsh's own prefix filter (daemon already filtered)
+  compadd -Q -U -- "${completions[@]}"
+}
+
+# --------------------------------------------------------------------------- #
+#  Plugin setup                                                                 #
+# --------------------------------------------------------------------------- #
+
+# Register _fast_autocomplete as the first completer.
+# On failure (daemon down, no completions) it returns non-zero and zsh falls
+# through to normal _complete and then _files.
+zstyle ':completion:*' completer _fast_autocomplete _complete _files
+
+# Kick off the daemon directly (not via subshell) so disown takes effect in
+# the current shell. _fa_ensure_daemon must not be called via & here.
+if [[ ! -S $(_fa_socket_path) ]]; then
+  _fa_plugin_bin=$(_fa_bin_path)
+  if [[ -n $_fa_plugin_bin ]]; then
+    _fa_launch "$_fa_plugin_bin"
+  fi
+  unset _fa_plugin_bin
+fi
