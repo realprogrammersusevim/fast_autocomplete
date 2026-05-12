@@ -1,0 +1,15 @@
+[package]
+name = "fast_autocomplete"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ahash = "0.8.12"
+anyhow = "1.0.102"
+dashmap = "6.1.0"
+env_logger = "0.11.10"
+libc = "0.2.186"
+log = "0.4.29"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.3", features = ["full"] }
