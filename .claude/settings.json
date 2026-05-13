@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo clippy *)",
+      "Bash(cargo test *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; echo \"$f\" | grep -q 'scripts/harvester\\.zsh$' && zsh /Users/jonathanmilligan/code/fast_autocomplete/tests/test_harvester.sh; } 2>/dev/null || true",
+            "statusMessage": "Running harvester snapshot tests..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; echo \"$f\" | grep -qE '/src/[^/]+\\.rs$' && cargo test --manifest-path /Users/jonathanmilligan/code/fast_autocomplete/Cargo.toml 2>&1; } 2>/dev/null || true",
+            "statusMessage": "Running cargo test...",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; echo \"$f\" | grep -q '\\.zsh$' && zsh -n \"$f\" && echo \"syntax OK: $f\"; } 2>/dev/null || true",
+            "statusMessage": "Checking zsh syntax..."
+          }
+        ]
+      }
+    ]
+  }
+}
