@@ -290,6 +290,13 @@ _hv_node() {
     done
     path_json+="]"
 
+    # If the completion function produced no flags, no subcommands, and no file
+    # indicator, the harvest found nothing useful. Skip emitting a node so the
+    # daemon falls back to file completions for unknown commands.
+    if (( ! wants && ${#flags} == 0 && ${#subs} == 0 )); then
+        return
+    fi
+
     local wants_str=false
     (( wants )) && wants_str=true
 
