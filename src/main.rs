@@ -1,4 +1,5 @@
 mod cache;
+mod client;
 mod files;
 mod frecency;
 mod harvester;
@@ -67,8 +68,34 @@ fn try_acquire_lock() -> anyhow::Result<Option<std::fs::File>> {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let path = socket_path();
+    match args.get(1).map(String::as_str) {
+        Some("--complete") => client::run_complete(&path),
+        Some("--display") => {
+            let cols = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(80);
+            client::run_display(&path, cols);
+        }
+        Some("--record") => {
+            let value = args.get(2).map(String::as_str).unwrap_or("");
+            client::run_record(&path, value);
+        }
+        _ => {
+            if let Err(e) = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(daemon_main())
+            {
+                eprintln!("fast_autocomplete daemon error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+async fn daemon_main() -> anyhow::Result<()> {
     env_logger::init();
 
     // Acquire exclusive lock before touching the socket — prevents the TOCTOU

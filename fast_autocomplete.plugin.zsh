@@ -13,9 +13,6 @@
 _FA_PLUGIN_DIR=${0:A:h}
 
 # Launch the daemon detached from the current shell.
-# Uses a subshell so the backgrounded process is reparented to PID 1 when the
-# subshell exits — no job-control dependency, works in interactive and
-# non-interactive shells alike.
 _fa_launch() {
   ( nohup "$1" </dev/null &>/dev/null & )
 }
@@ -26,7 +23,6 @@ _fa_socket_path() {
     return
   fi
   local uid=${UID:-$(id -u)}
-  # TMPDIR on macOS ends with /, so use ${TMPDIR:-/tmp/} to always get a slash.
   print -- "${TMPDIR:-/tmp/}fast_autocomplete_${uid}.sock"
 }
 
@@ -98,46 +94,24 @@ _fa_alias_expand() {
 
 # Fire-and-forget: tell the daemon a completion was accepted (for frecency).
 _fa_record() {
-  local value=$1 sock
+  local value=$1
   [[ -z $value ]] && return
-  sock=$(_fa_socket_path)
-  [[ ! -S $sock ]] && return
-  local payload
-  payload=$(printf 'RECORD=%s\n\n' "$value")
-  if (( $+commands[socat] )); then
-    ( print -- "$payload" | socat -t1 - "UNIX-CONNECT:$sock" &>/dev/null ) &!
-  else
-    ( print -- "$payload" | nc -U "$sock" &>/dev/null ) &!
-  fi
-}
-
-# Send one request to the daemon and print the raw JSON response.
-# Prefers socat, falls back to nc -U (both support Unix domain sockets).
-_fa_query() {
-  local sock=$1 buffer=$2 cursor=$3 cwd=$4 session=$5
-  local payload
-  payload=$(printf 'BUFFER=%s\nCURSOR=%d\nCWD=%s\nSESSION=%d\n\n' \
-    "$buffer" "$cursor" "$cwd" "$session")
-
-  if (( $+commands[socat] )); then
-    print -- "$payload" | socat -t1 - "UNIX-CONNECT:$sock" 2>/dev/null
-  else
-    # nc -U works on macOS and most Linux distributions.
-    print -- "$payload" | nc -U "$sock" 2>/dev/null
-  fi
+  [[ -z $_FA_BIN ]] && return
+  "$_FA_BIN" --record "$value" &>/dev/null &!
 }
 
 # --------------------------------------------------------------------------- #
 #  Completion function                                                          #
 # --------------------------------------------------------------------------- #
 
-# Last completions returned by the daemon; reused on `unchanged:true`.
+# Last completions returned by the daemon; reused on exit code 2 (unchanged).
 typeset -ga _FA_LAST_COMPLETIONS
 
 _fast_autocomplete() {
-  local sock response
-  sock=$(_fa_socket_path)
+  [[ -z $_FA_BIN ]] && return 1
 
+  local sock
+  sock=$(_fa_socket_path)
   if [[ ! -S $sock ]]; then
     _fa_ensure_daemon || return 1
     [[ -S $sock ]] || return 1
@@ -147,39 +121,28 @@ _fast_autocomplete() {
   _fa_exp=( ${(f)"$(_fa_alias_expand "$BUFFER" "$CURSOR")"} )
   local _fa_cursor=${_fa_exp[1]} _fa_buffer=${_fa_exp[2]}
 
-  response=$(_fa_query "$sock" "$_fa_buffer" "$_fa_cursor" "$PWD" "$$")
-  [[ -z $response ]] && return 1
-
-  if [[ $response == *'"unchanged":true'* ]]; then
-    (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
-    compadd -V fast_autocomplete -Q -U -- "${_FA_LAST_COMPLETIONS[@]}"
-    if [[ $_FA_REVERSE_COMPLETE == 1 ]]; then
-      compstate[insert]='menu:-1'
-    else
-      compstate[insert]='menu:1'
-    fi
-    return 0
-  fi
+  local payload
+  payload=$(printf 'BUFFER=%s\nCURSOR=%d\nCWD=%s\nSESSION=%d\n\n' \
+    "$_fa_buffer" "$_fa_cursor" "$PWD" "$$")
 
   local -a completions
-  if (( $+commands[jq] )); then
-    completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
-  else
-    # Minimal fallback for simple completions (no embedded quotes or commas).
-    local raw=${response#*'"completions":['}
-    raw=${raw%%\]*}
-    completions=( ${(s:,:)${raw//\"/}} )
-  fi
+  completions=( ${(f)"$("$_FA_BIN" --complete <<< "$payload")"} )
+  local rc=$?
 
-  (( ${#completions} == 0 )) && return 1
+  case $rc in
+    2)
+      (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
+      completions=( "${_FA_LAST_COMPLETIONS[@]}" )
+      ;;
+    0)
+      _FA_LAST_COMPLETIONS=( "${completions[@]}" )
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 
-  _FA_LAST_COMPLETIONS=( "${completions[@]}" )
-
-  # -Q: don't quote special characters zsh would add
-  # -U: skip zsh's own prefix filter (daemon already filtered)
-  # -V: unsorted group — preserves daemon's ranked order so menu:1 inserts the top result
   compadd -V fast_autocomplete -Q -U -- "${completions[@]}"
-
   if [[ $_FA_REVERSE_COMPLETE == 1 ]]; then
     compstate[insert]='menu:-1'
   else
@@ -192,7 +155,7 @@ _fast_autocomplete() {
 # --------------------------------------------------------------------------- #
 
 typeset -g _FA_PREV_BUFFER_DISPLAY=''
-typeset -ga _FA_LAST_DISPLAY_COMPLETIONS
+typeset -g _FA_LAST_DISPLAY=''
 
 _fa_update_below() {
   # Skip when there are pending keystrokes — avoids blocking mid-rapid-type
@@ -203,10 +166,13 @@ _fa_update_below() {
 
   if [[ -z ${BUFFER// } ]]; then
     zle -M ''
+    _FA_LAST_DISPLAY=''
     return
   fi
 
-  local sock response
+  [[ -z $_FA_BIN ]] && return
+
+  local sock
   sock=$(_fa_socket_path)
   if [[ ! -S $sock ]]; then
     zle -M ''
@@ -217,64 +183,29 @@ _fa_update_below() {
   _fa_exp=( ${(f)"$(_fa_alias_expand "$BUFFER" "$CURSOR")"} )
   local _fa_cursor=${_fa_exp[1]} _fa_buffer=${_fa_exp[2]}
 
-  response=$(_fa_query "$sock" "$_fa_buffer" "$_fa_cursor" "$PWD" "$(( $$ + 1000000 ))")
-  [[ -z $response ]] && return
+  local payload
+  payload=$(printf 'BUFFER=%s\nCURSOR=%d\nCWD=%s\nSESSION=%d\n\n' \
+    "$_fa_buffer" "$_fa_cursor" "$PWD" "$(( $$ + 1000000 ))")
 
-  local -a completions
+  local display rc
+  display=$("$_FA_BIN" --display "$COLUMNS" <<< "$payload")
+  rc=$?
 
-  # unchanged:true means the daemon's cached list is current — re-render it.
-  # The display may have been cleared by _fa_clear_below even though the list
-  # hasn't changed (e.g. user ran a command then retyped the same input).
-  if [[ $response == *'"unchanged":true'* ]]; then
-    (( ${#_FA_LAST_DISPLAY_COMPLETIONS} == 0 )) && return
-    completions=( "${_FA_LAST_DISPLAY_COMPLETIONS[@]}" )
-  else
-    if (( $+commands[jq] )); then
-      completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
-    else
-      local raw=${response#*'"completions":['}
-      raw=${raw%%\]*}
-      completions=( ${(s:,:)${raw//\"/}} )
-    fi
-
-    if (( ${#completions} == 0 )); then
-      zle -M ''
+  case $rc in
+    2)
+      # Unchanged — re-render the last display string without re-querying.
+      [[ -n $_FA_LAST_DISPLAY ]] && zle -M -- "$_FA_LAST_DISPLAY"
       return
-    fi
-
-    _FA_LAST_DISPLAY_COMPLETIONS=( "${completions[@]}" )
-  fi
-
-  # Format completions into aligned columns, capped at max_rows display lines.
-  local term_width=${COLUMNS:-80}
-  local max_rows=8
-  local max_shown=40
-  local -a shown=( "${completions[@]:0:$max_shown}" )
-
-  local max_len=0 c
-  for c in "${shown[@]}"; do
-    (( ${#c} > max_len )) && max_len=${#c}
-  done
-
-  local col_width=$(( max_len + 2 ))
-  local num_cols=$(( term_width / col_width ))
-  (( num_cols < 1 )) && num_cols=1
-
-  # Recompute max_shown so we never exceed max_rows lines.
-  local max_by_rows=$(( num_cols * max_rows ))
-  (( max_by_rows < max_shown )) && max_shown=$max_by_rows
-  shown=( "${completions[@]:0:$max_shown}" )
-
-  local output='' i=0
-  for c in "${shown[@]}"; do
-    output+="${(r:$col_width:)c}"
-    (( ++i % num_cols == 0 )) && output+=$'\n'
-  done
-  # Trim trailing newline and add overflow notice if needed.
-  output=${output%$'\n'}
-  (( ${#completions} > max_shown )) && output+=$'\n'"  … ($(( ${#completions} - max_shown )) more, press Tab to browse)"
-
-  zle -M -- "$output"
+      ;;
+    0)
+      _FA_LAST_DISPLAY=$display
+      zle -M -- "$display"
+      ;;
+    *)
+      _FA_LAST_DISPLAY=''
+      zle -M ''
+      ;;
+  esac
 }
 
 _fa_clear_below() {
@@ -290,6 +221,7 @@ _fa_clear_below() {
   fi
   zle -M ''
   _FA_PREV_BUFFER_DISPLAY=''
+  _FA_LAST_DISPLAY=''
 }
 
 autoload -Uz add-zle-hook-widget
@@ -311,16 +243,13 @@ bindkey '^[[Z' _fa_reverse_complete_widget
 # --------------------------------------------------------------------------- #
 
 # Register _fast_autocomplete as the first completer.
-# On failure (daemon down, no completions) it returns non-zero and zsh falls
-# through to normal _complete and then _files.
 zstyle ':completion:*' completer _fast_autocomplete _complete _files
 
-# Kick off the daemon directly (not via subshell) so disown takes effect in
-# the current shell. _fa_ensure_daemon must not be called via & here.
-if [[ ! -S $(_fa_socket_path) ]]; then
-  _fa_plugin_bin=$(_fa_bin_path)
-  if [[ -n $_fa_plugin_bin ]]; then
-    _fa_launch "$_fa_plugin_bin"
-  fi
-  unset _fa_plugin_bin
+# Cache the binary path at load time so hot paths don't re-resolve it.
+typeset -g _FA_BIN
+_FA_BIN=$(_fa_bin_path)
+
+# Kick off the daemon if the socket is absent.
+if [[ -n $_FA_BIN && ! -S $(_fa_socket_path) ]]; then
+  _fa_launch "$_FA_BIN"
 fi
