@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build --release          # production binary → target/release/fast_autocomplete
 cargo build                    # debug build
 cargo run                      # start the daemon (debug)
-cargo test                     # all tests
+cargo test                     # all tests (unit tests live in every src/*.rs module)
 cargo test parser              # run only tests in src/parser.rs (module name filter)
 ```
 
