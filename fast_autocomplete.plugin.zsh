@@ -96,6 +96,21 @@ _fa_alias_expand() {
   print -r -- "${new_before}${after}"
 }
 
+# Fire-and-forget: tell the daemon a completion was accepted (for frecency).
+_fa_record() {
+  local value=$1 sock
+  [[ -z $value ]] && return
+  sock=$(_fa_socket_path)
+  [[ ! -S $sock ]] && return
+  local payload
+  payload=$(printf 'RECORD=%s\n\n' "$value")
+  if (( $+commands[socat] )); then
+    ( print -- "$payload" | socat -t1 - "UNIX-CONNECT:$sock" &>/dev/null ) &!
+  else
+    ( print -- "$payload" | nc -U "$sock" &>/dev/null ) &!
+  fi
+}
+
 # Send one request to the daemon and print the raw JSON response.
 # Prefers socat, falls back to nc -U (both support Unix domain sockets).
 _fa_query() {
@@ -263,6 +278,16 @@ _fa_update_below() {
 }
 
 _fa_clear_below() {
+  # When the user accepts a line, record the last word if it matches what we
+  # offered as a completion — this feeds the in-daemon frecency ranking.
+  if (( ${#_FA_LAST_COMPLETIONS} > 0 && ${#BUFFER} > 0 )); then
+    local -a _fa_words
+    _fa_words=( ${(z)BUFFER} )
+    local _fa_last=${_fa_words[-1]}
+    if [[ -n ${_FA_LAST_COMPLETIONS[(r)${_fa_last}]} ]]; then
+      _fa_record "$_fa_last"
+    fi
+  fi
   zle -M ''
   _FA_PREV_BUFFER_DISPLAY=''
 }

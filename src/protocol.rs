@@ -5,6 +5,8 @@ pub struct Request {
     pub cursor: usize,
     pub cwd: String,
     pub session: u64,
+    /// Set when the client is reporting an accepted completion for frecency recording.
+    pub record: Option<String>,
 }
 
 impl Request {
@@ -21,6 +23,7 @@ impl Request {
             cursor: map.get("CURSOR").and_then(|s| s.parse().ok()).unwrap_or(0),
             cwd: map.get("CWD").copied().unwrap_or(".").to_string(),
             session: map.get("SESSION").and_then(|s| s.parse().ok()).unwrap_or(0),
+            record: map.get("RECORD").filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
     }
 }
@@ -104,6 +107,25 @@ mod tests {
         // split_once('=') only splits on the first '=' — value may contain '='
         let req = Request::parse("BUFFER=git commit -m=fix\n");
         assert_eq!(req.buffer, "git commit -m=fix");
+    }
+
+    #[test]
+    fn test_parse_record_field() {
+        let req = Request::parse("RECORD=commit\n\n");
+        assert_eq!(req.record, Some("commit".to_string()));
+        assert_eq!(req.buffer, "");
+    }
+
+    #[test]
+    fn test_parse_record_empty_is_none() {
+        let req = Request::parse("RECORD=\n\n");
+        assert_eq!(req.record, None);
+    }
+
+    #[test]
+    fn test_parse_no_record_is_none() {
+        let req = Request::parse("BUFFER=git\nCURSOR=3\nCWD=/tmp\nSESSION=1\n");
+        assert_eq!(req.record, None);
     }
 
     #[test]

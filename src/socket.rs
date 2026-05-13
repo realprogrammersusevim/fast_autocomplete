@@ -60,6 +60,11 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
 async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     let req = Request::parse(raw);
 
+    if let Some(value) = req.record {
+        state.frecency.lock().await.record(&value);
+        return Response::unchanged();
+    }
+
     let parsed = crate::parser::parse_buffer(&req.buffer, req.cursor);
     let cwd = std::path::Path::new(&req.cwd);
 
@@ -211,6 +216,20 @@ mod tests {
         assert!(!response.unchanged);
         let completions = response.completions.unwrap_or_default();
         assert!(completions.contains(&"myfile.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_record_request_updates_frecency() {
+        let state = make_state();
+        // Score starts at zero.
+        assert_eq!(state.frecency.lock().await.score("commit"), 0.0);
+        // Send a RECORD request.
+        let response = process_request("RECORD=commit\n\n", &state).await;
+        assert!(response.unchanged);
+        // Frecency for "commit" should now be positive.
+        assert!(state.frecency.lock().await.score("commit") > 0.0);
+        // Unrelated item is unchanged.
+        assert_eq!(state.frecency.lock().await.score("push"), 0.0);
     }
 
     #[tokio::test]
