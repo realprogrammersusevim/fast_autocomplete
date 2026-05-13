@@ -80,11 +80,14 @@ _hv_run_func() {
         }
 
         # _arguments: parse specs to extract flags, literal value lists, and state names.
-        # When -C is present and a ->state spec is found for a positional argument,
-        # set $state so that the caller's case block dispatches to subcommand handlers.
+        # When -C is present, set $state only for the ->state spec whose positional
+        # index matches CURRENT so the caller dispatches to the right handler.
         # Return 1 when state is set so that "... && return" guards in callers don't fire.
         _arguments() {
             local _has_C=0 spec bare flag action list v
+            # Argument position being completed (1 = first arg after command name).
+            local _cur_pos=$(( CURRENT - 1 ))
+            local _seq=0  # counter for unnumbered positional specs
             [[ ${@[(r)-C]} == -C ]] && _has_C=1
 
             for spec in "$@"; do
@@ -102,6 +105,27 @@ _hv_run_func() {
 
                 if [[ $spec == *:* ]]; then
                     action="${spec##*:}"
+
+                    # Resolve whether this positional spec applies at _cur_pos.
+                    local _is_pos=0 _pos_match=0
+                    if [[ $bare != [-+]* ]]; then
+                        _is_pos=1
+                        local _head="${bare%%:*}"
+                        if [[ $_head == <-> ]]; then
+                            # Explicitly numbered: '1:msg:action'
+                            (( _head == _cur_pos )) && _pos_match=1
+                        elif [[ $_head == '#' ]]; then
+                            # Numeric argument: treat like unnumbered positional
+                            (( ++_seq == _cur_pos )) && _pos_match=1
+                        elif [[ $_head == '*' || $_head == '**' ]]; then
+                            # Catch-all: matches any remaining position
+                            _pos_match=1
+                        else
+                            # Unnumbered positional: '::msg:action' or ':msg:action'
+                            (( ++_seq == _cur_pos )) && _pos_match=1
+                        fi
+                    fi
+
                     case $action in
                         _files|_path_files|_globbed_files|_absolute_path|_file_absolute)
                             print -- "FILE:" ;;
@@ -115,9 +139,8 @@ _hv_run_func() {
                             done
                             ;;
                         -\>*)
-                            # State machine dispatch: set $state for the first positional
-                            # ->state spec so the caller's case block runs its subcommand list.
-                            if (( _has_C )) && [[ -z $state ]] && [[ $bare != [-+]* ]]; then
+                            # Only dispatch state machine for the spec that matches CURRENT.
+                            if (( _has_C && _is_pos && _pos_match )) && [[ -z $state ]]; then
                                 state="${action#->}"
                             fi
                             ;;
@@ -270,7 +293,7 @@ _hv_node() {
 
     print -r -- "{\"path\":${path_json},\"flags\":$(_hv_json_arr "${flags[@]}"),\"subcommands\":$(_hv_json_arr "${subs[@]}"),\"wants_files\":${wants_str}}"
 
-    if (( !wants && ${#subs} > 0 && depth < 3 )); then
+    if (( ${#subs} > 0 && depth < 3 )); then
         local -aU unique_subs=("${subs[@]}")
         local sub
         for sub in "${unique_subs[@]}"; do

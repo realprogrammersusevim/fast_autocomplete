@@ -25,7 +25,14 @@ impl CompletionTree {
         for word in &words[1..] {
             match node.children.get(*word) {
                 Some(child) => node = child,
-                None => break,
+                None => {
+                    // If the word is a known subcommand that hasn't been harvested into
+                    // a child node yet, don't leak the parent's sibling subcommands.
+                    if node.subcommands.iter().any(|s| s == word) {
+                        return Some((vec![], vec![], true));
+                    }
+                    break;
+                }
             }
         }
         Some((
