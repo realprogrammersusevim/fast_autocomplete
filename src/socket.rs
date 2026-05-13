@@ -42,7 +42,9 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
 
     let (tx, _) = tokio::sync::watch::channel(false);
     let tx = Arc::new(tx);
-    state.harvest_channels.insert(cmd.to_string(), Arc::clone(&tx));
+    state
+        .harvest_channels
+        .insert(cmd.to_string(), Arc::clone(&tx));
 
     let cmd_owned = cmd.to_string();
     let state_clone = Arc::clone(state);
