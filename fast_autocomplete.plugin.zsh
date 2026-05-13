@@ -192,7 +192,7 @@ _fa_update_below() {
   output=${output%$'\n'}
   (( ${#completions} > max_shown )) && output+=$'\n'"  … ($(( ${#completions} - max_shown )) more, press Tab to browse)"
 
-  zle -M "$output"
+  zle -M -- "$output"
 }
 
 _fa_clear_below() {
