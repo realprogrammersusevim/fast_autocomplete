@@ -20,6 +20,7 @@ _hv_json_escape() {
 
 _hv_json_arr() {
     local -aU items=("$@")
+    items=("${(o)items[@]}")
     local out="["
     local first=1
     local item
@@ -47,6 +48,7 @@ _hv_run_func() {
     (
         # compadd: intercept items being added to the completion list.
         compadd() {
+            print -r -- "DEBUG: compadd called with $@" >&2
             local f=0 skip=0 past=0 i a
             for (( i = 1; i <= $#; i++ )); do
                 a=${@[$i]}
@@ -59,6 +61,9 @@ _hv_run_func() {
                     --) past=1 ;;
                     -f|-F) f=1 ;;
                     -a)
+                        # Skip optional '--' separator before array name(s)
+                        local _next_i=$(( i + 1 ))
+                        [[ ${@[$_next_i]} == '--' ]] && (( i++ ))
                         (( i++ ))
                         local -a _arr=("${(@P)${@[$i]}}")
                         for x in "${_arr[@]}"; do
@@ -73,7 +78,7 @@ _hv_run_func() {
                         done
                         ;;
                     # Options that consume the next argument
-                    -d|-J|-V|-X|-M|-P|-S|-r|-R|-p|-s|-o|-W|-i|-I|-t|-n|-e|-2|-1|-l|-E|-O|-q|-Q|-U|-L) skip=1 ;;
+                    -d|-J|-V|-X|-M|-P|-S|-r|-R|-p|-s|-o|-W|-i|-I|-t|-n|-e|-2|-1|-l|-E|-O) skip=1 ;;
                 esac
             done
             (( f )) && print -- "FILE:"
@@ -84,6 +89,7 @@ _hv_run_func() {
         # index matches CURRENT so the caller dispatches to the right handler.
         # Return 1 when state is set so that "... && return" guards in callers don't fire.
         _arguments() {
+            print -r -- "DEBUG: _arguments called with $@" >&2
             local _has_C=0 spec bare flag action list v
             # Argument position being completed (1 = first arg after command name).
             local _cur_pos=$(( CURRENT - 1 ))
@@ -142,6 +148,7 @@ _hv_run_func() {
                             # Only dispatch state machine for the spec that matches CURRENT.
                             if (( _has_C && _is_pos && _pos_match )) && [[ -z $state ]]; then
                                 state="${action#->}"
+                                print -r -- "DEBUG: _arguments set state to $state" >&2
                                 # Emit FILE: now for catch-all positionals (head == * or **).
                                 # Completion functions like _rm use '*:: :->file' then call
                                 # _files in their case block, but that block is unreachable here
@@ -156,6 +163,15 @@ _hv_run_func() {
                 fi
             done
             # Non-zero return prevents "... && return" guards from short-circuiting.
+            # Populate $line and update $words to the remaining positional words,
+            # as real _arguments -C does, so callers can dispatch subcommand
+            # handlers via e.g. _git-${line[1]} or words[1].
+            if (( _has_C )); then
+                line=("${(@)words[2,-1]}")
+                words=("${(@)words[2,-1]}")
+                (( CURRENT-- ))
+                print -r -- "DEBUG: _arguments updated words to $words, CURRENT to $CURRENT, line to $line" >&2
+            fi
             (( _has_C && ${#state} > 0 )) && return 1
             return 0
         }
@@ -231,7 +247,12 @@ _hv_run_func() {
         TRAPALRM() { return 1; }
         ALARM=1
 
-        local -a words=("${cmd_words[@]}" "")
+        # For subcommand nodes (depth ≥ 2) use "--" as the current word so that
+        # bash-style completion functions (which check 'case $cur in --*)')  emit
+        # their flag lists rather than positional completions.
+        local _hv_cur=""
+        (( ${#cmd_words} > 1 )) && _hv_cur="--"
+        local -a words=("${cmd_words[@]}" "$_hv_cur")
         local CURRENT=$(( ${#cmd_words} + 1 ))
         local PREFIX='' SUFFIX='' IPREFIX='' ISUFFIX=''
         local curcontext=":complete:${top}:"
@@ -240,14 +261,16 @@ _hv_run_func() {
         local -a line
         local -A opt_args
 
-        "$comp_func" 2>/dev/null
+        "$comp_func"
+        print -r -- "DEBUG: AFTER $comp_func: functions[_git_commit] = ${+functions[_git_commit]}" >&2
         ALARM=0
-    ) 2>/dev/null
+    )
 }
 
 # Harvest the completion node for a given command path.
 # Args: cmd [subcmd [subcmd...]]
 _hv_node() {
+    print -r -- "DEBUG: _hv_node called with $@" >&2
     local -a cmd_words=("$@")
     local depth=${#cmd_words}
     (( depth > 3 )) && return
@@ -277,8 +300,10 @@ _hv_node() {
                 [[ -n $v ]] && flags+=("$v")
                 ;;
             ITEM:*)
-                local v=${line#ITEM:}
+                local v=${${line#ITEM:}%% #}
                 [[ -z $v ]] && continue
+                # Skip the '--no-...' pseudo-option emitted by __gitcomp as a placeholder.
+                [[ $v == '--no-...'* ]] && continue
                 if [[ $v == -* ]]; then
                     flags+=("$v")
                 else
