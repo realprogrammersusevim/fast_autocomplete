@@ -66,6 +66,36 @@ _fa_ensure_daemon() {
   return 1
 }
 
+# Expand the first word as an alias before querying the daemon.
+# Only expands when the first word is complete (followed by a space).
+# Skips aliases that contain shell metacharacters.
+# Outputs expanded buffer length (new cursor), then expanded buffer.
+_fa_alias_expand() {
+  local buffer=$1 cursor=$2
+  local before="${buffer:0:$cursor}" after="${buffer:$cursor}"
+  local first_word="${before%% *}"
+
+  # Only expand when the command word is done (space follows it).
+  if [[ $before != $first_word' '* ]]; then
+    print -- "$cursor"
+    print -r -- "$buffer"
+    return
+  fi
+
+  local expansion="${aliases[$first_word]-}"
+  # Skip complex aliases (pipes, redirects, subshells, etc.).
+  if [[ -z $expansion || $expansion == *['|&;()``$<>']* ]]; then
+    print -- "$cursor"
+    print -r -- "$buffer"
+    return
+  fi
+
+  local rest="${before#$first_word}"
+  local new_before="${expansion}${rest}"
+  print -- "${#new_before}"
+  print -r -- "${new_before}${after}"
+}
+
 # Send one request to the daemon and print the raw JSON response.
 # Prefers socat, falls back to nc -U (both support Unix domain sockets).
 _fa_query() {
@@ -98,7 +128,11 @@ _fast_autocomplete() {
     [[ -S $sock ]] || return 1
   fi
 
-  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$$")
+  local -a _fa_exp
+  _fa_exp=( ${(f)"$(_fa_alias_expand "$BUFFER" "$CURSOR")"} )
+  local _fa_cursor=${_fa_exp[1]} _fa_buffer=${_fa_exp[2]}
+
+  response=$(_fa_query "$sock" "$_fa_buffer" "$_fa_cursor" "$PWD" "$$")
   [[ -z $response ]] && return 1
 
   if [[ $response == *'"unchanged":true'* ]]; then
@@ -149,7 +183,11 @@ _fa_update_below() {
     return
   fi
 
-  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$(( $$ + 1000000 ))")
+  local -a _fa_exp
+  _fa_exp=( ${(f)"$(_fa_alias_expand "$BUFFER" "$CURSOR")"} )
+  local _fa_cursor=${_fa_exp[1]} _fa_buffer=${_fa_exp[2]}
+
+  response=$(_fa_query "$sock" "$_fa_buffer" "$_fa_cursor" "$PWD" "$(( $$ + 1000000 ))")
   [[ -z $response ]] && return
 
   # unchanged:true means completions are the same — keep the current display.
