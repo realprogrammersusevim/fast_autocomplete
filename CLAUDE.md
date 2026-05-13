@@ -14,7 +14,10 @@ cargo build                    # debug build
 cargo run                      # start the daemon (debug)
 cargo test                     # all tests (unit tests live in every src/*.rs module)
 cargo test parser              # run only tests in src/parser.rs (module name filter)
+zsh tests/test_harvester.sh    # snapshot tests for scripts/harvester.zsh
 ```
+
+Harvester snapshots live in `tests/harvester_snapshots/`. Run `zsh tests/test_harvester.sh --update` to regenerate them after an intentional change.
 
 Socket path is `$TMPDIR/fast_autocomplete_<uid>.sock` by default; override with `$FAST_AUTOCOMPLETE_SOCKET`. Enable logging with `RUST_LOG=debug cargo run`.
 
