@@ -138,7 +138,11 @@ _fast_autocomplete() {
   if [[ $response == *'"unchanged":true'* ]]; then
     (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
     compadd -V fast_autocomplete -Q -U -- "${_FA_LAST_COMPLETIONS[@]}"
-    compstate[insert]='menu:1'
+    if [[ $_FA_REVERSE_COMPLETE == 1 ]]; then
+      compstate[insert]='menu:-1'
+    else
+      compstate[insert]='menu:1'
+    fi
     return 0
   fi
 
@@ -161,7 +165,11 @@ _fast_autocomplete() {
   # -V: unsorted group — preserves daemon's ranked order so menu:1 inserts the top result
   compadd -V fast_autocomplete -Q -U -- "${completions[@]}"
 
-  compstate[insert]='menu:1'
+  if [[ $_FA_REVERSE_COMPLETE == 1 ]]; then
+    compstate[insert]='menu:-1'
+  else
+    compstate[insert]='menu:1'
+  fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +270,16 @@ _fa_clear_below() {
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget zle-line-pre-redraw _fa_update_below
 add-zle-hook-widget zle-line-finish     _fa_clear_below
+
+# Shift+Tab: complete using the last (lowest-ranked) item in the list.
+typeset -g _FA_REVERSE_COMPLETE=0
+_fa_reverse_complete_widget() {
+  _FA_REVERSE_COMPLETE=1
+  zle expand-or-complete
+  _FA_REVERSE_COMPLETE=0
+}
+zle -N _fa_reverse_complete_widget
+bindkey '^[[Z' _fa_reverse_complete_widget
 
 # --------------------------------------------------------------------------- #
 #  Plugin setup                                                                 #
