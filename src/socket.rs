@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -34,45 +33,26 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
     }
 }
 
-/// Ensure completions for `cmd` are in the tree, triggering a JIT harvest if needed.
-/// Waits up to 300 ms for the harvest to finish before returning.
-async fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
-    if state.harvested.contains_key(cmd) {
+/// Trigger a JIT harvest for `cmd` if one hasn't started yet. Returns immediately;
+/// the harvest runs in the background and populates the tree for subsequent requests.
+fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
+    if state.harvested.contains_key(cmd) || state.harvest_channels.contains_key(cmd) {
         return;
     }
 
-    // Get or create the watch channel for this command.
-    let mut is_new = false;
-    let tx = state
-        .harvest_channels
-        .entry(cmd.to_string())
-        .or_insert_with(|| {
-            is_new = true;
-            let (tx, _) = tokio::sync::watch::channel(false);
-            Arc::new(tx)
-        })
-        .clone();
+    let (tx, _) = tokio::sync::watch::channel(false);
+    let tx = Arc::new(tx);
+    state.harvest_channels.insert(cmd.to_string(), Arc::clone(&tx));
 
-    if is_new {
-        let cmd_owned = cmd.to_string();
-        let state_clone = Arc::clone(state);
-        let tx_clone = Arc::clone(&tx);
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = harvester::harvest_command(&cmd_owned, &state_clone.tree) {
-                log::warn!("harvest_command('{}') failed: {}", cmd_owned, e);
-            }
-            state_clone.harvested.insert(cmd_owned, ());
-            let _ = tx_clone.send(true);
-        });
-    }
-
-    // subscribe() starts at the current channel value, so if send(true) already
-    // happened we see it immediately without any await.
-    let mut rx = tx.subscribe();
-    if *rx.borrow() {
-        return;
-    }
-    let _ = tokio::time::timeout(Duration::from_millis(300), rx.wait_for(|v| *v)).await;
+    let cmd_owned = cmd.to_string();
+    let state_clone = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = harvester::harvest_command(&cmd_owned, &state_clone.tree) {
+            log::warn!("harvest_command('{}') failed: {}", cmd_owned, e);
+        }
+        state_clone.harvested.insert(cmd_owned, ());
+        let _ = tx.send(true);
+    });
 }
 
 async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
@@ -85,7 +65,7 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
 
     // JIT: trigger harvest for the top-level command if not yet done.
     if let Some(cmd) = parsed.lookup_words.first() {
-        ensure_harvested(cmd, state).await;
+        ensure_harvested(cmd, state);
     }
 
     let (static_items, wants_files) = if parsed.lookup_words.is_empty() {
