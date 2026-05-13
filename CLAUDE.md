@@ -18,6 +18,8 @@ cargo test parser              # run only tests in src/parser.rs (module name fi
 
 Socket path is `$TMPDIR/fast_autocomplete_<uid>.sock` by default; override with `$FAST_AUTOCOMPLETE_SOCKET`. Enable logging with `RUST_LOG=debug cargo run`.
 
+To rebuild and hot-swap a running daemon: `scripts/update.sh` (builds release, kills old daemon, starts new one).
+
 ## Architecture
 
 ```
@@ -30,7 +32,7 @@ socket.rs          — accept loop; per-connection handler; JIT harvest trigger
     ├─ cache.rs    — CompletionTree: trie of CompletionNode {flags, subcommands, wants_files, children}
     ├─ files.rs    — filesystem listing with ~ and relative-path expansion
     ├─ frecency.rs — in-memory frequency×recency scorer (in-process only, not persisted)
-    ├─ ranking.rs  — merge static + file items → prefix-filter → dedup → sort by frecency/type/alpha → cap 200
+    ├─ ranking.rs  — merge static + file items → fuzzy-filter (skim scorer) → dedup → sort by frecency+fuzzy/type/alpha → cap 200; flags only shown when typing `-`
     └─ session.rs  — per-session hash dedup (sends `unchanged:true` if list hasn't changed)
 
 harvester.rs       — two entry points:
@@ -43,22 +45,27 @@ harvester.rs       — two entry points:
 
 **SharedState** (defined in `main.rs`):
 - `tree: Arc<CompletionTree>` — shared trie, populated incrementally as commands are harvested
-- `cmd_names: OnceLock<Vec<String>>` — all known command names, populated quickly at startup
+- `cmd_names: OnceLock<Vec<String>>` — all known command names (zsh completion table + `ZSH_BUILTINS` constant), populated quickly at startup
 - `harvest_channels: DashMap<String, Arc<watch::Sender<bool>>>` — one channel per command; signals completion
 - `harvested: DashMap<String, ()>` — set of commands whose harvest has finished
 - `sessions: DashMap<u64, SessionState>`, `frecency: Mutex<FrecencyStore>`
 
-**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and sends `true` on the watch channel when done. Concurrent requests for the same command subscribe to the same channel and wait up to 300 ms. Subsequent requests skip the check via `harvested`.
+**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_channels`.
 
 **Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`. Response: single JSON line `{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
 
-**Harvester script** (`scripts/harvester.zsh`): run inside a zsh subshell with the target command as `$1`; intercepts `compadd`/`_arguments`/`_describe` to extract flags and subcommands without executing external processes. Emits NDJSON, one object per completion node. The Rust side embeds this script via `include_str!` and writes it to a temp file before executing.
+**Harvester script** (`scripts/harvester.zsh`): run inside a zsh subshell with the target command as `$1`; intercepts `compadd`/`_arguments`/`_describe` to extract flags and subcommands without executing external processes. Emits NDJSON, one object per completion node. The Rust side embeds this script via `include_str!` and writes it to a temp file before executing. The `list_commands()` path uses a separate inline script (`LIST_COMMANDS_SCRIPT` in `harvester.rs`) that is never written to `scripts/`.
 
-**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a plugin manager load it). It registers `_fast_autocomplete` as the first completer, auto-launches the daemon if the socket is absent, and falls through to `_complete` + `_files` on failure. Prefers `socat` for socket I/O, falls back to `nc -U`.
+**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a plugin manager load it). It registers `_fast_autocomplete` as the first completer, auto-launches the daemon if the socket is absent, and falls through to `_complete` + `_files` on failure. Prefers `socat` for socket I/O, falls back to `nc -U`. Before querying the daemon, `_fa_alias_expand` resolves simple (no metacharacter) aliases so that aliased commands get proper completions. Also installs `zle-line-pre-redraw` / `zle-line-finish` hooks (`_fa_update_below` / `_fa_clear_below`) that render completions in a columnar display below the prompt via `zle -M` as you type — separate from Tab completion.
 
 **Key design constraints:**
 - Harvests are lazy and per-command — the daemon is immediately usable (file-only fallback) before any harvest runs.
 - Each connection handles exactly one request then closes.
 - Frecency is in-memory only; it resets when the daemon restarts.
 - The harvester recurses up to depth 3 (command → subcommand → sub-subcommand) to avoid combinatorial explosion.
-- Stale-socket detection at startup: if the socket file exists and accepts a connection, a second daemon instance exits immediately.
+- Single-instance enforcement via `flock` on a `.lock` file (same base path as the socket with `.lock` extension). A non-blocking `LOCK_EX` attempt at startup exits immediately if another daemon holds the lock — eliminates the TOCTOU race of socket-based detection.
+- Any leftover socket from a crashed daemon is removed at startup before binding.
+- `harvest_command()` wraps the child process in a `KillOnDrop` guard (defined inline) so the child is always killed and reaped on every exit path, preventing zombies.
+- Flags (items starting with `-`) are only shown when `current_word` itself starts with `-` — keeps completions uncluttered while typing subcommands or paths.
+- Completions are fuzzy-filtered using the skim algorithm (`fuzzy_matcher` crate): frecency dominates scoring; the fuzzy score breaks ties among zero-frecency items. Items with no fuzzy match are dropped entirely.
+- Alias expansion: the zsh plugin resolves simple aliases (no shell metacharacters) before querying the daemon, so `g status` expands to `git status` and gets proper completions.
