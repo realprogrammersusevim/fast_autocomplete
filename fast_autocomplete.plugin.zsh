@@ -137,7 +137,8 @@ _fast_autocomplete() {
 
   if [[ $response == *'"unchanged":true'* ]]; then
     (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
-    compadd -Q -U -- "${_FA_LAST_COMPLETIONS[@]}"
+    compadd -V fast_autocomplete -Q -U -- "${_FA_LAST_COMPLETIONS[@]}"
+    compstate[insert]='menu:1'
     return 0
   fi
 
@@ -157,7 +158,10 @@ _fast_autocomplete() {
 
   # -Q: don't quote special characters zsh would add
   # -U: skip zsh's own prefix filter (daemon already filtered)
-  compadd -Q -U -- "${completions[@]}"
+  # -V: unsorted group — preserves daemon's ranked order so menu:1 inserts the top result
+  compadd -V fast_autocomplete -Q -U -- "${completions[@]}"
+
+  compstate[insert]='menu:1'
 }
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +171,8 @@ _fast_autocomplete() {
 typeset -g _FA_PREV_BUFFER_DISPLAY=''
 
 _fa_update_below() {
+  # Skip when there are pending keystrokes — avoids blocking mid-rapid-type
+  (( PENDING )) && return
   # Skip when nothing has changed (cursor moves, redraws, etc.)
   [[ $BUFFER == $_FA_PREV_BUFFER_DISPLAY ]] && return
   _FA_PREV_BUFFER_DISPLAY=$BUFFER
@@ -207,8 +213,9 @@ _fa_update_below() {
     return
   fi
 
-  # Format completions into aligned columns.
+  # Format completions into aligned columns, capped at max_rows display lines.
   local term_width=${COLUMNS:-80}
+  local max_rows=8
   local max_shown=40
   local -a shown=( "${completions[@]:0:$max_shown}" )
 
@@ -220,6 +227,11 @@ _fa_update_below() {
   local col_width=$(( max_len + 2 ))
   local num_cols=$(( term_width / col_width ))
   (( num_cols < 1 )) && num_cols=1
+
+  # Recompute max_shown so we never exceed max_rows lines.
+  local max_by_rows=$(( num_cols * max_rows ))
+  (( max_by_rows < max_shown )) && max_shown=$max_by_rows
+  shown=( "${completions[@]:0:$max_shown}" )
 
   local output='' i=0
   for c in "${shown[@]}"; do

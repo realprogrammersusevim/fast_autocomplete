@@ -1,7 +1,9 @@
 use crate::frecency::FrecencyStore;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
-/// Merge static cache completions and file completions, prefix-filter, deduplicate,
-/// and sort by frecency then type (non-flags before flags) then alphabetically.
+/// Merge static cache completions and file completions, fuzzy-filter, deduplicate,
+/// and sort by combined fuzzy+frecency score, then type (non-flags before flags), then alpha.
 /// Flags (items starting with `-`) are only included when `current_word` starts with `-`.
 pub fn rank_completions(
     static_items: Vec<String>,
@@ -10,25 +12,41 @@ pub fn rank_completions(
     frecency: &FrecencyStore,
 ) -> Vec<String> {
     let typing_flag = current_word.starts_with('-');
+
     let mut all: Vec<String> = static_items
         .into_iter()
         .chain(file_items)
-        .filter(|s| s.starts_with(current_word) && (typing_flag || !s.starts_with('-')))
+        .filter(|s| typing_flag || !s.starts_with('-'))
         .collect();
 
     all.sort();
     all.dedup();
 
-    let mut scored: Vec<(f64, bool, String)> = all
-        .into_iter()
-        .map(|s| {
-            let score = frecency.score(&s);
-            let is_flag = s.starts_with('-');
-            (score, is_flag, s)
-        })
-        .collect();
+    let matcher = SkimMatcherV2::default().smart_case();
 
-    // High frecency first, then non-flags before flags, then alphabetical.
+    let mut scored: Vec<(f64, bool, String)> = if current_word.is_empty() {
+        all.into_iter()
+            .map(|s| {
+                let score = frecency.score(&s);
+                let is_flag = s.starts_with('-');
+                (score, is_flag, s)
+            })
+            .collect()
+    } else {
+        all.into_iter()
+            .filter_map(|s| {
+                matcher.fuzzy_match(&s, current_word).map(|fuzzy_score| {
+                    let freq = frecency.score(&s);
+                    // Frecency dominates; fuzzy score breaks ties among zero-frecency items.
+                    let combined = freq * 100.0 + fuzzy_score as f64;
+                    let is_flag = s.starts_with('-');
+                    (combined, is_flag, s)
+                })
+            })
+            .collect()
+    };
+
+    // High score first, then non-flags before flags, then alphabetical.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)

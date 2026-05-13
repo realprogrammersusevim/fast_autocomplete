@@ -28,11 +28,9 @@ pub fn list_files(cwd: &Path, partial: &str) -> Vec<String> {
             continue;
         }
 
-        if name_str.starts_with(name_prefix) {
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let display = format!("{}{}{}", dir_part, name_str, if is_dir { "/" } else { "" });
-            results.push(display);
-        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let display = format!("{}{}{}", dir_part, name_str, if is_dir { "/" } else { "" });
+        results.push(display);
     }
 
     results.sort();

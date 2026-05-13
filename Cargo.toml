@@ -8,6 +8,7 @@ ahash = "0.8.12"
 anyhow = "1.0.102"
 dashmap = "6.1.0"
 env_logger = "0.11.10"
+fuzzy-matcher = "0.3.7"
 libc = "0.2.186"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
