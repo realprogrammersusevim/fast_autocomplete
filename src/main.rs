@@ -37,23 +37,54 @@ fn socket_path() -> std::path::PathBuf {
     tmpdir.join(format!("fast_autocomplete_{}.sock", uid))
 }
 
+fn lock_path() -> std::path::PathBuf {
+    let mut p = socket_path();
+    p.set_extension("lock");
+    p
+}
+
+/// Acquires an exclusive non-blocking flock on the lock file.
+/// Returns the open File (lock is held until the File is dropped).
+/// Returns None if another process already holds the lock.
+fn try_acquire_lock() -> anyhow::Result<Option<std::fs::File>> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path())?;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        Ok(Some(file))
+    } else {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(None)
+        } else {
+            Err(err.into())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
+    // Acquire exclusive lock before touching the socket — prevents the TOCTOU
+    // race where concurrent startups each see no socket and all try to bind.
+    let _lock = match try_acquire_lock()? {
+        Some(f) => f,
+        None => {
+            log::info!("daemon already running (lock held by another process)");
+            return Ok(());
+        }
+    };
+
     let path = socket_path();
 
-    // Stale socket check: if we can connect, another daemon is already running.
+    // Remove a leftover socket from a previously crashed daemon.
     if path.exists() {
-        match tokio::net::UnixStream::connect(&path).await {
-            Ok(_) => {
-                log::info!("daemon already running at {:?}", path);
-                return Ok(());
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        let _ = std::fs::remove_file(&path);
     }
 
     let listener = tokio::net::UnixListener::bind(&path)?;
