@@ -87,7 +87,11 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         }
     };
 
-    let file_items = if wants_files {
+    // Also include files when static_items is empty — if the tree node exists but
+    // produced no usable completions (harvester limitation, stale data, etc.),
+    // files are better than nothing.
+    let effective_wants_files = wants_files || static_items.is_empty();
+    let file_items = if effective_wants_files {
         files::list_files(cwd, &parsed.current_word)
     } else {
         vec![]
@@ -207,5 +211,29 @@ mod tests {
         assert!(!response.unchanged);
         let completions = response.completions.unwrap_or_default();
         assert!(completions.contains(&"myfile.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_known_command_no_static_items_falls_back_to_files() {
+        // A command node exists with wants_files=false but no flags or subcommands.
+        // The daemon must still return file completions rather than nothing.
+        let state = make_state();
+        state.tree.insert(
+            &["mycmd".to_string()],
+            vec![],  // no flags
+            vec![],  // no subcommands
+            false,   // wants_files explicitly false in tree
+        );
+        state.harvested.insert("mycmd".to_string(), ());
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        std::fs::File::create(tmpdir.path().join("report.txt")).unwrap();
+        let req = format!(
+            "BUFFER=mycmd \nCURSOR=6\nCWD={}\nSESSION=5\n",
+            tmpdir.path().display()
+        );
+        let response = process_request(&req, &state).await;
+        assert!(!response.unchanged);
+        let completions = response.completions.unwrap_or_default();
+        assert!(completions.contains(&"report.txt".to_string()));
     }
 }
