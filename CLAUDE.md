@@ -42,9 +42,18 @@ The response is a single JSON line: `{"completions":[...],"unchanged":false}`. P
 ## Architecture
 
 ```
-zsh client
-    │  (Unix socket, one request/connection)
+zsh plugin
+    │  (invokes binary subcommands for socket I/O)
     ▼
+main.rs (subcommand dispatch)
+    ├─ (no args)       → daemon_main() — async tokio daemon
+    ├─ --complete      → client::run_complete()  — query daemon, print completions to stdout
+    ├─ --display <cols>→ client::run_display()   — query daemon, format columns for inline display
+    └─ --record <val>  → client::run_record()    — send RECORD= request to update frecency
+
+client.rs          — Rust socket client (replaces zsh socket I/O); handles connect/send/recv,
+                     column formatting for inline display, and fire-and-forget frecency recording
+
 socket.rs          — accept loop; per-connection handler; JIT harvest trigger
     │
     ├─ parser.rs   — splits BUFFER at CURSOR into (lookup_words, current_word)
@@ -71,11 +80,11 @@ harvester.rs       — two entry points:
 
 **JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_channels`.
 
-**Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`. Response: single JSON line `{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
+**Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`. Optional `RECORD=<value>` skips completion and records a frecency hit instead — daemon returns `{"unchanged":true}`. Response: single JSON line `{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
 
 **Harvester script** (`scripts/harvester.zsh`): run inside a zsh subshell with the target command as `$1`; intercepts `compadd`/`_arguments`/`_describe` to extract flags and subcommands without executing external processes. Emits NDJSON, one object per completion node. The Rust side embeds this script via `include_str!` and writes it to a temp file before executing. The `list_commands()` path uses a separate inline script (`LIST_COMMANDS_SCRIPT` in `harvester.rs`) that is never written to `scripts/`.
 
-**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a plugin manager load it). It registers `_fast_autocomplete` as the first completer, auto-launches the daemon if the socket is absent, and falls through to `_complete` + `_files` on failure. Prefers `socat` for socket I/O, falls back to `nc -U`. Before querying the daemon, `_fa_alias_expand` resolves simple (no metacharacter) aliases so that aliased commands get proper completions. Also installs `zle-line-pre-redraw` / `zle-line-finish` hooks (`_fa_update_below` / `_fa_clear_below`) that render completions in a columnar display below the prompt via `zle -M` as you type — separate from Tab completion.
+**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a plugin manager load it). It registers `_fast_autocomplete` as the first completer, auto-launches the daemon if the socket is absent, and falls through to `_complete` + `_files` on failure. All socket I/O is delegated to the binary via subcommands (`fast_autocomplete --complete`, `--display <cols>`, `--record <val>`) — the plugin no longer does raw socket I/O itself. Before querying the daemon, `_fa_alias_expand` resolves simple (no metacharacter) aliases so that aliased commands get proper completions. Also installs `zle-line-pre-redraw` / `zle-line-finish` hooks (`_fa_update_below` / `_fa_clear_below`) that render completions in a columnar display below the prompt via `zle -M` as you type — separate from Tab completion. When the user accepts a completion, the plugin calls `fast_autocomplete --record <value>` to update the frecency store.
 
 **Key design constraints:**
 - Harvests are lazy and per-command — the daemon is immediately usable (file-only fallback) before any harvest runs.
