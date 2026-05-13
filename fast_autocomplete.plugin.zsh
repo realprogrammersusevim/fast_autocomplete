@@ -127,6 +127,84 @@ _fast_autocomplete() {
 }
 
 # --------------------------------------------------------------------------- #
+#  As-you-type display (zle -M area below the prompt)                          #
+# --------------------------------------------------------------------------- #
+
+typeset -g _FA_PREV_BUFFER_DISPLAY=''
+
+_fa_update_below() {
+  # Skip when nothing has changed (cursor moves, redraws, etc.)
+  [[ $BUFFER == $_FA_PREV_BUFFER_DISPLAY ]] && return
+  _FA_PREV_BUFFER_DISPLAY=$BUFFER
+
+  if [[ -z ${BUFFER// } ]]; then
+    zle -M ''
+    return
+  fi
+
+  local sock response
+  sock=$(_fa_socket_path)
+  if [[ ! -S $sock ]]; then
+    zle -M ''
+    return
+  fi
+
+  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$$")
+  [[ -z $response ]] && return
+
+  # unchanged:true means completions are the same — keep the current display.
+  [[ $response == *'"unchanged":true'* ]] && return
+
+  local -a completions
+  if (( $+commands[jq] )); then
+    completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
+  else
+    local raw=${response#*'"completions":['}
+    raw=${raw%%\]*}
+    completions=( ${(s:,:)${raw//\"/}} )
+  fi
+
+  if (( ${#completions} == 0 )); then
+    zle -M ''
+    return
+  fi
+
+  # Format completions into aligned columns.
+  local term_width=${COLUMNS:-80}
+  local max_shown=40
+  local -a shown=( "${completions[@]:0:$max_shown}" )
+
+  local max_len=0 c
+  for c in "${shown[@]}"; do
+    (( ${#c} > max_len )) && max_len=${#c}
+  done
+
+  local col_width=$(( max_len + 2 ))
+  local num_cols=$(( term_width / col_width ))
+  (( num_cols < 1 )) && num_cols=1
+
+  local output='' i=0
+  for c in "${shown[@]}"; do
+    output+="${(r:$col_width:)c}"
+    (( ++i % num_cols == 0 )) && output+=$'\n'
+  done
+  # Trim trailing newline and add overflow notice if needed.
+  output=${output%$'\n'}
+  (( ${#completions} > max_shown )) && output+=$'\n'"  … ($(( ${#completions} - max_shown )) more, press Tab to browse)"
+
+  zle -M "$output"
+}
+
+_fa_clear_below() {
+  zle -M ''
+  _FA_PREV_BUFFER_DISPLAY=''
+}
+
+autoload -Uz add-zle-hook-widget
+add-zle-hook-widget zle-line-pre-redraw _fa_update_below
+add-zle-hook-widget zle-line-finish     _fa_clear_below
+
+# --------------------------------------------------------------------------- #
 #  Plugin setup                                                                 #
 # --------------------------------------------------------------------------- #
 
