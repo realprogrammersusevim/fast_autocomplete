@@ -20,6 +20,22 @@ Socket path is `$TMPDIR/fast_autocomplete_<uid>.sock` by default; override with 
 
 To rebuild and hot-swap a running daemon: `scripts/update.sh` (builds release, kills old daemon, starts new one).
 
+## Manual socket testing
+
+Send a raw request to the running daemon with `socat` or `nc`:
+
+```sh
+# socat (preferred)
+printf 'BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=test\n\n' "$PWD" \
+  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock"
+
+# nc fallback
+printf 'BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=test\n\n' "$PWD" \
+  | nc -U "$TMPDIR/fast_autocomplete_$(id -u).sock"
+```
+
+The response is a single JSON line: `{"completions":[...],"unchanged":false}`. Pipe through `jq` to pretty-print. Change `BUFFER`/`CURSOR` to test different inputs; `CURSOR` must equal the byte offset of the cursor in `BUFFER`.
+
 ## Architecture
 
 ```
