@@ -59,3 +59,80 @@ impl Response {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_full_request() {
+        let input = "BUFFER=git add\nCURSOR=7\nCWD=/home/user\nSESSION=42\n";
+        let req = Request::parse(input).unwrap();
+        assert_eq!(req.buffer, "git add");
+        assert_eq!(req.cursor, 7);
+        assert_eq!(req.cwd, "/home/user");
+        assert_eq!(req.session, 42);
+    }
+
+    #[test]
+    fn test_parse_missing_cursor_defaults_to_zero() {
+        let req = Request::parse("BUFFER=git\nCWD=/tmp\nSESSION=1\n").unwrap();
+        assert_eq!(req.cursor, 0);
+    }
+
+    #[test]
+    fn test_parse_invalid_cursor_defaults_to_zero() {
+        let req = Request::parse("BUFFER=git\nCURSOR=notanumber\n").unwrap();
+        assert_eq!(req.cursor, 0);
+    }
+
+    #[test]
+    fn test_parse_missing_cwd_defaults_to_dot() {
+        let req = Request::parse("BUFFER=git\nCURSOR=0\nSESSION=1\n").unwrap();
+        assert_eq!(req.cwd, ".");
+    }
+
+    #[test]
+    fn test_parse_missing_session_defaults_to_zero() {
+        let req = Request::parse("BUFFER=git\nCURSOR=0\nCWD=/tmp\n").unwrap();
+        assert_eq!(req.session, 0);
+    }
+
+    #[test]
+    fn test_parse_buffer_with_equals_sign() {
+        // split_once('=') only splits on the first '=' — value may contain '='
+        let req = Request::parse("BUFFER=git commit -m=fix\n").unwrap();
+        assert_eq!(req.buffer, "git commit -m=fix");
+    }
+
+    #[test]
+    fn test_response_unchanged_serialization() {
+        let json = serde_json::to_string(&Response::unchanged()).unwrap();
+        assert!(json.contains("\"unchanged\":true"));
+        assert!(!json.contains("completions"));
+        assert!(!json.contains("error"));
+    }
+
+    #[test]
+    fn test_response_results_serialization() {
+        let json = serde_json::to_string(&Response::results(vec!["add".into(), "commit".into()])).unwrap();
+        assert!(json.contains("\"completions\""));
+        assert!(json.contains("\"add\""));
+        assert!(json.contains("\"unchanged\":false"));
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn test_response_error_serialization() {
+        let json = serde_json::to_string(&Response::error("parse_error")).unwrap();
+        assert!(json.contains("\"error\":\"parse_error\""));
+        assert!(json.contains("\"unchanged\":false"));
+        assert!(!json.contains("\"completions\""));
+    }
+
+    #[test]
+    fn test_response_results_empty_vec() {
+        let json = serde_json::to_string(&Response::results(vec![])).unwrap();
+        assert!(json.contains("\"completions\":[]"));
+    }
+}

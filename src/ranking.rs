@@ -60,3 +60,107 @@ pub fn rank_completions(
 
     scored.into_iter().take(200).map(|(_, _, s)| s).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_inputs() {
+        let result = rank_completions(vec![], vec![], "", &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_flags_hidden_when_not_typing_flag() {
+        let result = rank_completions(
+            vec!["--verbose".to_string(), "subcommand".to_string()],
+            vec![],
+            "",
+            &HashMap::new(),
+        );
+        assert!(result.contains(&"subcommand".to_string()));
+        assert!(!result.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn test_flags_shown_when_typing_flag() {
+        let result = rank_completions(
+            vec!["--verbose".to_string(), "--help".to_string(), "subcommand".to_string()],
+            vec![],
+            "--",
+            &HashMap::new(),
+        );
+        assert!(result.contains(&"--verbose".to_string()));
+        assert!(result.contains(&"--help".to_string()));
+        // "subcommand" has no '-' chars, so fuzzy match against "--" drops it
+        assert!(!result.contains(&"subcommand".to_string()));
+    }
+
+    #[test]
+    fn test_frecency_dominates_fuzzy() {
+        let mut scores = HashMap::new();
+        scores.insert("apricot".to_string(), 100.0);
+        let result = rank_completions(
+            vec!["apple".to_string(), "apricot".to_string()],
+            vec![],
+            "ap",
+            &scores,
+        );
+        assert!(!result.is_empty());
+        assert_eq!(result[0], "apricot");
+    }
+
+    #[test]
+    fn test_dedup_static_file_overlap() {
+        let result = rank_completions(
+            vec!["foo".to_string(), "bar".to_string()],
+            vec!["foo".to_string(), "baz".to_string()],
+            "",
+            &HashMap::new(),
+        );
+        assert_eq!(result.iter().filter(|s| s.as_str() == "foo").count(), 1);
+    }
+
+    #[test]
+    fn test_cap_at_200() {
+        let items: Vec<String> = (0..300).map(|i| format!("item_{:03}", i)).collect();
+        let result = rank_completions(items, vec![], "", &HashMap::new());
+        assert_eq!(result.len(), 200);
+    }
+
+    #[test]
+    fn test_fuzzy_filter_drops_non_matches() {
+        // "xyzzy" contains 'x' which is absent from all candidates
+        let result = rank_completions(
+            vec!["add".to_string(), "commit".to_string(), "checkout".to_string()],
+            vec![],
+            "xyzzy",
+            &HashMap::new(),
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_alpha_sort_as_tiebreaker() {
+        let result = rank_completions(
+            vec!["zebra".to_string(), "apple".to_string(), "mango".to_string()],
+            vec![],
+            "",
+            &HashMap::new(),
+        );
+        assert_eq!(result, vec!["apple", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn test_file_items_included_in_output() {
+        let result = rank_completions(
+            vec!["add".to_string()],
+            vec!["./README.md".to_string()],
+            "",
+            &HashMap::new(),
+        );
+        assert!(result.contains(&"add".to_string()));
+        assert!(result.contains(&"./README.md".to_string()));
+    }
+}

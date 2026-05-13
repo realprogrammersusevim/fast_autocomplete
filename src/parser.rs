@@ -114,4 +114,75 @@ mod tests {
         assert_eq!(p.lookup_words, vec!["git", "add"]);
         assert_eq!(p.current_word, "");
     }
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(split_shell_words(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_single_word_no_space() {
+        assert_eq!(split_shell_words("git"), vec!["git"]);
+    }
+
+    #[test]
+    fn test_tab_separator() {
+        assert_eq!(split_shell_words("git\tadd\tfoo"), vec!["git", "add", "foo"]);
+    }
+
+    #[test]
+    fn test_double_quote_basic() {
+        assert_eq!(
+            split_shell_words(r#"echo "hello world""#),
+            vec!["echo", "hello world"]
+        );
+    }
+
+    #[test]
+    fn test_double_quote_backslash_escape() {
+        // Exercises the DoubleBackslash state: \" inside double quotes → literal "
+        assert_eq!(
+            split_shell_words(r#"echo "hel\"lo""#),
+            vec!["echo", r#"hel"lo"#]
+        );
+    }
+
+    #[test]
+    fn test_backslash_space() {
+        // Backslash before space → literal space, stays in same word
+        assert_eq!(
+            split_shell_words(r"echo hello\ world"),
+            vec!["echo", "hello world"]
+        );
+    }
+
+    #[test]
+    fn test_mixed_quotes() {
+        assert_eq!(
+            split_shell_words(r#"git commit -m 'fix: "bug"'"#),
+            vec!["git", "commit", "-m", r#"fix: "bug""#]
+        );
+    }
+
+    #[test]
+    fn test_parse_buffer_cursor_zero() {
+        let p = parse_buffer("git add foo", 0);
+        assert!(p.lookup_words.is_empty());
+        assert_eq!(p.current_word, "");
+    }
+
+    #[test]
+    fn test_parse_buffer_cursor_beyond_end() {
+        // cursor=999 is clamped to buffer length (3)
+        let p = parse_buffer("git", 999);
+        assert!(p.lookup_words.is_empty());
+        assert_eq!(p.current_word, "git");
+    }
+
+    #[test]
+    fn test_parse_buffer_empty_input() {
+        let p = parse_buffer("", 0);
+        assert!(p.lookup_words.is_empty());
+        assert_eq!(p.current_word, "");
+    }
 }

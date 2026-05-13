@@ -95,10 +95,18 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         vec![]
     };
 
-    let frecency = state.frecency.lock().await;
+    // Snapshot only the scores we need, then release the lock before the CPU-heavy ranking.
+    let frecency_scores = {
+        let frecency = state.frecency.lock().await;
+        static_items
+            .iter()
+            .chain(file_items.iter())
+            .map(|s| (s.clone(), frecency.score(s)))
+            .collect::<std::collections::HashMap<String, f64>>()
+    };
+
     let completions =
-        ranking::rank_completions(static_items, file_items, &parsed.current_word, &frecency);
-    drop(frecency);
+        ranking::rank_completions(static_items, file_items, &parsed.current_word, &frecency_scores);
 
     let mut session = state
         .sessions
@@ -109,5 +117,88 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         Response::unchanged()
     } else {
         Response::results(completions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::sync::{Arc, OnceLock};
+
+    fn make_state() -> Arc<crate::SharedState> {
+        Arc::new(crate::SharedState {
+            tree: Arc::new(crate::cache::CompletionTree::default()),
+            cmd_names: OnceLock::new(),
+            harvest_channels: DashMap::new(),
+            harvested: DashMap::new(),
+            sessions: DashMap::new(),
+            frecency: tokio::sync::Mutex::new(crate::frecency::FrecencyStore::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_root_request_returns_command_names() {
+        let state = make_state();
+        let _ = state.cmd_names.set(vec!["cargo".to_string(), "git".to_string()]);
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let req = format!("BUFFER=\nCURSOR=0\nCWD={}\nSESSION=1\n", tmpdir.path().display());
+        let response = process_request(&req, &state).await;
+        let completions = response.completions.unwrap_or_default();
+        assert!(completions.contains(&"git".to_string()));
+        assert!(completions.contains(&"cargo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_valid_request_returns_completions() {
+        let state = make_state();
+        state.tree.insert(
+            &["git".to_string()],
+            vec![],
+            vec!["add".to_string(), "commit".to_string()],
+            false,
+        );
+        // Mark as already harvested so ensure_harvested doesn't spawn a zsh process
+        state.harvested.insert("git".to_string(), ());
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let req = format!("BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=2\n", tmpdir.path().display());
+        let response = process_request(&req, &state).await;
+        assert!(!response.unchanged);
+        let completions = response.completions.unwrap_or_default();
+        assert!(completions.contains(&"add".to_string()));
+        assert!(completions.contains(&"commit".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_request_returns_unchanged() {
+        let state = make_state();
+        state.tree.insert(
+            &["git".to_string()],
+            vec![],
+            vec!["add".to_string()],
+            false,
+        );
+        state.harvested.insert("git".to_string(), ());
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let req = format!("BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=3\n", tmpdir.path().display());
+        let first = process_request(&req, &state).await;
+        assert!(!first.unchanged);
+        let second = process_request(&req, &state).await;
+        assert!(second.unchanged);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_command_falls_back_to_files() {
+        let state = make_state();
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        std::fs::File::create(tmpdir.path().join("myfile.txt")).unwrap();
+        let req = format!(
+            "BUFFER=unknowncmd \nCURSOR=11\nCWD={}\nSESSION=4\n",
+            tmpdir.path().display()
+        );
+        let response = process_request(&req, &state).await;
+        assert!(!response.unchanged);
+        let completions = response.completions.unwrap_or_default();
+        assert!(completions.contains(&"myfile.txt".to_string()));
     }
 }
