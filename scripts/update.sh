@@ -2,20 +2,26 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SOCKET="${FAST_AUTOCOMPLETE_SOCKET:-${TMPDIR:-/tmp}/fast_autocomplete_$(id -u).sock}"
+SOCKET="${FAST_AUTOCOMPLETE_SOCKET:-${TMPDIR%/}/fast_autocomplete_$(id -u).sock}"
+LOCK="${SOCKET%.sock}.lock"
 
 echo "Building release binary..."
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml"
 
 echo "Stopping running daemon..."
-if pid=$(lsof "$SOCKET" -t 2>/dev/null | head -1); then
-    kill "$pid" && echo "Stopped PID $pid"
+# Prefer the lock file for detection — lsof on macOS finds regular files reliably.
+pid=$(lsof -t "$LOCK" 2>/dev/null | head -1 || true)
+if [[ -n $pid ]]; then
+    kill "$pid" && echo "Stopped PID $pid" || true
+    # Wait up to 2s for the lock to be released before starting the replacement.
+    for i in {1..20}; do
+        lsof -t "$LOCK" &>/dev/null || break
+        sleep 0.1
+    done
 else
     echo "No running daemon found"
 fi
 
-# Remove the socket file so the new daemon can bind without seeing the old one
-# as a live peer (otherwise stale-socket detection would cause it to exit).
 rm -f "$SOCKET"
 
 echo "Starting new daemon..."
