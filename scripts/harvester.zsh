@@ -142,6 +142,14 @@ _hv_run_func() {
                             # Only dispatch state machine for the spec that matches CURRENT.
                             if (( _has_C && _is_pos && _pos_match )) && [[ -z $state ]]; then
                                 state="${action#->}"
+                                # Emit FILE: now for catch-all positionals (head == * or **).
+                                # Completion functions like _rm use '*:: :->file' then call
+                                # _files in their case block, but that block is unreachable here
+                                # because '_rm' re-declares 'line' as a scalar and the subsequent
+                                # 'line[CURRENT]=()' assignment fatally exits the subshell before
+                                # _files is ever called. Emitting FILE: inside _arguments ensures
+                                # it is captured even when the caller exits early.
+                                [[ $_head == '*' || $_head == '**' ]] && print -- "FILE:"
                             fi
                             ;;
                     esac
