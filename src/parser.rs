@@ -8,11 +8,7 @@ pub struct ParsedBuffer {
 pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
     let relevant = &buffer[..cursor.min(buffer.len())];
     let words = split_shell_words(relevant);
-    let cursor_after_space = relevant
-        .chars()
-        .last()
-        .map(|c| c.is_whitespace())
-        .unwrap_or(false);
+    let cursor_after_space = relevant.chars().last().is_some_and(char::is_whitespace);
 
     if cursor_after_space || words.is_empty() {
         ParsedBuffer {
@@ -127,7 +123,10 @@ mod tests {
 
     #[test]
     fn test_tab_separator() {
-        assert_eq!(split_shell_words("git\tadd\tfoo"), vec!["git", "add", "foo"]);
+        assert_eq!(
+            split_shell_words("git\tadd\tfoo"),
+            vec!["git", "add", "foo"]
+        );
     }
 
     #[test]

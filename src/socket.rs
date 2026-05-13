@@ -29,7 +29,7 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
 
     let response = process_request(&block, &state).await;
     if let Ok(json) = serde_json::to_string(&response) {
-        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
+        let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
     }
 }
 
@@ -50,7 +50,7 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
     let state_clone = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         if let Err(e) = harvester::harvest_command(&cmd_owned, &state_clone.tree) {
-            log::warn!("harvest_command('{}') failed: {}", cmd_owned, e);
+            log::warn!("harvest_command('{cmd_owned}') failed: {e}");
         }
         state_clone.harvested.insert(cmd_owned, ());
         let _ = tx.send(true);
@@ -58,9 +58,7 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
 }
 
 async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
-    let Some(req) = Request::parse(raw) else {
-        return Response::error("parse_error");
-    };
+    let req = Request::parse(raw);
 
     let parsed = crate::parser::parse_buffer(&req.buffer, req.cursor);
     let cwd = std::path::Path::new(&req.cwd);
@@ -105,13 +103,14 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
             .collect::<std::collections::HashMap<String, f64>>()
     };
 
-    let completions =
-        ranking::rank_completions(static_items, file_items, &parsed.current_word, &frecency_scores);
+    let completions = ranking::rank_completions(
+        static_items,
+        file_items,
+        &parsed.current_word,
+        &frecency_scores,
+    );
 
-    let mut session = state
-        .sessions
-        .entry(req.session)
-        .or_insert_with(crate::session::SessionState::default);
+    let mut session = state.sessions.entry(req.session).or_default();
 
     if session.is_duplicate(&completions) {
         Response::unchanged()
@@ -140,9 +139,14 @@ mod tests {
     #[tokio::test]
     async fn test_root_request_returns_command_names() {
         let state = make_state();
-        let _ = state.cmd_names.set(vec!["cargo".to_string(), "git".to_string()]);
+        let _ = state
+            .cmd_names
+            .set(vec!["cargo".to_string(), "git".to_string()]);
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let req = format!("BUFFER=\nCURSOR=0\nCWD={}\nSESSION=1\n", tmpdir.path().display());
+        let req = format!(
+            "BUFFER=\nCURSOR=0\nCWD={}\nSESSION=1\n",
+            tmpdir.path().display()
+        );
         let response = process_request(&req, &state).await;
         let completions = response.completions.unwrap_or_default();
         assert!(completions.contains(&"git".to_string()));
@@ -161,7 +165,10 @@ mod tests {
         // Mark as already harvested so ensure_harvested doesn't spawn a zsh process
         state.harvested.insert("git".to_string(), ());
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let req = format!("BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=2\n", tmpdir.path().display());
+        let req = format!(
+            "BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=2\n",
+            tmpdir.path().display()
+        );
         let response = process_request(&req, &state).await;
         assert!(!response.unchanged);
         let completions = response.completions.unwrap_or_default();
@@ -172,15 +179,15 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_request_returns_unchanged() {
         let state = make_state();
-        state.tree.insert(
-            &["git".to_string()],
-            vec![],
-            vec!["add".to_string()],
-            false,
-        );
+        state
+            .tree
+            .insert(&["git".to_string()], vec![], vec!["add".to_string()], false);
         state.harvested.insert("git".to_string(), ());
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let req = format!("BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=3\n", tmpdir.path().display());
+        let req = format!(
+            "BUFFER=git \nCURSOR=4\nCWD={}\nSESSION=3\n",
+            tmpdir.path().display()
+        );
         let first = process_request(&req, &state).await;
         assert!(!first.unchanged);
         let second = process_request(&req, &state).await;

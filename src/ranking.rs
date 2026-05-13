@@ -4,8 +4,7 @@ use std::sync::LazyLock;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-static MATCHER: LazyLock<SkimMatcherV2> =
-    LazyLock::new(|| SkimMatcherV2::default().smart_case());
+static MATCHER: LazyLock<SkimMatcherV2> = LazyLock::new(|| SkimMatcherV2::default().smart_case());
 
 /// Merge static cache completions and file completions, fuzzy-filter, deduplicate,
 /// and sort by combined fuzzy+frecency score, then type (non-flags before flags), then alpha.
@@ -86,7 +85,11 @@ mod tests {
     #[test]
     fn test_flags_shown_when_typing_flag() {
         let result = rank_completions(
-            vec!["--verbose".to_string(), "--help".to_string(), "subcommand".to_string()],
+            vec![
+                "--verbose".to_string(),
+                "--help".to_string(),
+                "subcommand".to_string(),
+            ],
             vec![],
             "--",
             &HashMap::new(),
@@ -124,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_cap_at_200() {
-        let items: Vec<String> = (0..300).map(|i| format!("item_{:03}", i)).collect();
+        let items: Vec<String> = (0..300).map(|i| format!("item_{i:03}")).collect();
         let result = rank_completions(items, vec![], "", &HashMap::new());
         assert_eq!(result.len(), 200);
     }
@@ -133,7 +136,11 @@ mod tests {
     fn test_fuzzy_filter_drops_non_matches() {
         // "xyzzy" contains 'x' which is absent from all candidates
         let result = rank_completions(
-            vec!["add".to_string(), "commit".to_string(), "checkout".to_string()],
+            vec![
+                "add".to_string(),
+                "commit".to_string(),
+                "checkout".to_string(),
+            ],
             vec![],
             "xyzzy",
             &HashMap::new(),
@@ -144,7 +151,11 @@ mod tests {
     #[test]
     fn test_alpha_sort_as_tiebreaker() {
         let result = rank_completions(
-            vec!["zebra".to_string(), "apple".to_string(), "mango".to_string()],
+            vec![
+                "zebra".to_string(),
+                "apple".to_string(),
+                "mango".to_string(),
+            ],
             vec![],
             "",
             &HashMap::new(),

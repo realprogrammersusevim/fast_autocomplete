@@ -12,7 +12,7 @@ pub struct FrecencyStore {
 
 impl FrecencyStore {
     pub fn new() -> Self {
-        FrecencyStore {
+        Self {
             entries: HashMap::new(),
         }
     }
@@ -21,7 +21,7 @@ impl FrecencyStore {
         let entry = self
             .entries
             .entry(completion.to_string())
-            .or_insert(FrecencyEntry {
+            .or_insert_with(|| FrecencyEntry {
                 count: 0,
                 last_used: Instant::now(),
             });
@@ -43,14 +43,17 @@ impl FrecencyStore {
         } else {
             0.4
         };
-        entry.count as f64 * weight
+        f64::from(entry.count) * weight
     }
 
     #[cfg(test)]
     pub(crate) fn insert_entry(&mut self, completion: &str, count: u32, age: std::time::Duration) {
         self.entries.insert(
             completion.to_string(),
-            FrecencyEntry { count, last_used: std::time::Instant::now() - age },
+            FrecencyEntry {
+                count,
+                last_used: std::time::Instant::now().checked_sub(age).unwrap(),
+            },
         );
     }
 }
@@ -61,6 +64,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_unrecorded_scores_zero() {
         let store = FrecencyStore::new();
         assert_eq!(store.score("anything"), 0.0);
@@ -71,7 +75,10 @@ mod tests {
         let mut store = FrecencyStore::new();
         store.record("git");
         let s = store.score("git");
-        assert!(s >= 1.0 && s < 2.0, "expected score in [1.0, 2.0), got {}", s);
+        assert!(
+            (1.0..2.0).contains(&s),
+            "expected score in [1.0, 2.0), got {s}"
+        );
     }
 
     #[test]
@@ -81,7 +88,7 @@ mod tests {
         store.record("git");
         store.record("git");
         let s = store.score("git");
-        assert!(s >= 2.9 && s <= 3.1, "expected score ≈ 3.0, got {}", s);
+        assert!((2.9..=3.1).contains(&s), "expected score ≈ 3.0, got {s}");
     }
 
     #[test]
@@ -95,6 +102,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_weight_tier_under_1_hour() {
         let mut store = FrecencyStore::new();
         store.insert_entry("x", 1, Duration::from_secs(100));
@@ -102,6 +110,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_weight_tier_1_to_24_hours() {
         let mut store = FrecencyStore::new();
         store.insert_entry("x", 1, Duration::from_secs(7_200));
@@ -109,6 +118,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_weight_tier_1_to_7_days() {
         let mut store = FrecencyStore::new();
         store.insert_entry("x", 1, Duration::from_secs(172_800));
@@ -116,6 +126,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_weight_tier_over_7_days() {
         let mut store = FrecencyStore::new();
         store.insert_entry("x", 1, Duration::from_secs(1_209_600));

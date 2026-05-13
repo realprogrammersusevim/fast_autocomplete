@@ -132,7 +132,7 @@ const ZSH_BUILTINS: &[&str] = &[
 ];
 
 /// Return the sorted list of all known command names without running any completion functions.
-/// Intended to run once at startup in a spawn_blocking task.
+/// Intended to run once at startup in a `spawn_blocking` task.
 pub fn list_commands() -> anyhow::Result<Vec<String>> {
     let script_path = std::env::temp_dir().join("fast_ac_list_cmds.zsh");
     std::fs::write(&script_path, LIST_COMMANDS_SCRIPT)?;
@@ -144,10 +144,10 @@ pub fn list_commands() -> anyhow::Result<Vec<String>> {
 
     let mut cmds: Vec<String> = BufReader::new(output.stdout.as_slice())
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .chain(ZSH_BUILTINS.iter().map(|s| s.to_string()))
+        .chain(ZSH_BUILTINS.iter().map(ToString::to_string))
         .collect();
     cmds.sort_unstable();
     cmds.dedup();
@@ -157,11 +157,8 @@ pub fn list_commands() -> anyhow::Result<Vec<String>> {
 
 /// Harvest completions for a single command and insert the results into `tree`.
 /// Passes the command name as `$1` to the harvester script (JIT mode).
-/// Intended to run in a spawn_blocking task.
+/// Intended to run in a `spawn_blocking` task.
 pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
-    let script_path = std::env::temp_dir().join("fast_ac_harvester.zsh");
-    std::fs::write(&script_path, HARVESTER_SCRIPT)?;
-
     // KillOnDrop ensures the child is killed and waited on every exit path
     // (normal return, early error, panic), preventing zombie processes.
     struct KillOnDrop(std::process::Child);
@@ -171,6 +168,9 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
             let _ = self.0.wait();
         }
     }
+
+    let script_path = std::env::temp_dir().join("fast_ac_harvester.zsh");
+    std::fs::write(&script_path, HARVESTER_SCRIPT)?;
 
     let mut child = KillOnDrop(
         Command::new("zsh")
@@ -216,6 +216,6 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
 
     // child guard drops here: kills if still running, then waits to reap.
     drop(child);
-    log::debug!("harvested {} nodes for '{}'", count, cmd);
+    log::debug!("harvested {count} nodes for '{cmd}'");
     Ok(())
 }

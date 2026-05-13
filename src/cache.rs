@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
+#[allow(clippy::use_self)] // Self cannot be used in struct field type definitions
 pub struct CompletionNode {
     pub flags: Vec<String>,
     pub subcommands: Vec<String>,
@@ -15,24 +16,24 @@ pub struct CompletionTree {
 }
 
 impl CompletionTree {
-    /// Walk words to find the deepest matching node; returns cloned (flags, subcommands, wants_files).
+    /// Walk words to find the deepest matching node; returns cloned (flags, subcommands, `wants_files`).
+    #[allow(clippy::significant_drop_tightening)] // root guard must live for the full borrow chain
     pub fn lookup(&self, words: &[&str]) -> Option<(Vec<String>, Vec<String>, bool)> {
         if words.is_empty() {
             return None;
         }
         let root = self.roots.get(words[0])?;
-        let mut node: &CompletionNode = &*root;
+        let mut node: &CompletionNode = &root;
         for word in &words[1..] {
-            match node.children.get(*word) {
-                Some(child) => node = child,
-                None => {
-                    // If the word is a known subcommand that hasn't been harvested into
-                    // a child node yet, don't leak the parent's sibling subcommands.
-                    if node.subcommands.iter().any(|s| s == word) {
-                        return Some((vec![], vec![], true));
-                    }
-                    break;
+            if let Some(child) = node.children.get(*word) {
+                node = child;
+            } else {
+                // If the word is a known subcommand that hasn't been harvested into
+                // a child node yet, don't leak the parent's sibling subcommands.
+                if node.subcommands.iter().any(|s| s == word) {
+                    return Some((vec![], vec![], true));
                 }
+                break;
             }
         }
         Some((
@@ -43,6 +44,7 @@ impl CompletionTree {
     }
 
     /// Insert a node at the given path, creating intermediate nodes as needed.
+    #[allow(clippy::significant_drop_tightening)] // DashMap entry guards must live for the full mutation
     pub fn insert(
         &self,
         path: &[String],
@@ -58,6 +60,7 @@ impl CompletionTree {
             entry.flags = flags;
             entry.subcommands = subcommands;
             entry.wants_files = wants_files;
+            drop(entry);
             return;
         }
         let mut root = self.roots.entry(path[0].clone()).or_default();
@@ -89,7 +92,10 @@ mod tests {
             true,
         );
         let result = tree.lookup(&["git"]);
-        assert_eq!(result, Some((vec!["--version".to_string()], vec!["add".to_string()], true)));
+        assert_eq!(
+            result,
+            Some((vec!["--version".to_string()], vec!["add".to_string()], true))
+        );
     }
 
     #[test]
@@ -112,13 +118,20 @@ mod tests {
     fn test_insert_and_lookup_depth_3() {
         let tree = CompletionTree::default();
         tree.insert(
-            &["cargo".to_string(), "test".to_string(), "filter".to_string()],
+            &[
+                "cargo".to_string(),
+                "test".to_string(),
+                "filter".to_string(),
+            ],
             vec!["--nocapture".to_string()],
             vec![],
             false,
         );
         let result = tree.lookup(&["cargo", "test", "filter"]);
-        assert_eq!(result, Some((vec!["--nocapture".to_string()], vec![], false)));
+        assert_eq!(
+            result,
+            Some((vec!["--nocapture".to_string()], vec![], false))
+        );
     }
 
     #[test]
@@ -138,18 +151,16 @@ mod tests {
         );
         // "rebase" is NOT in subcommands, so the break path returns parent node data
         let result = tree.lookup(&["git", "rebase"]);
-        assert_eq!(result, Some((vec!["--version".to_string()], vec!["add".to_string()], true)));
+        assert_eq!(
+            result,
+            Some((vec!["--version".to_string()], vec!["add".to_string()], true))
+        );
     }
 
     #[test]
     fn test_lookup_known_subcommand_no_child_node() {
         let tree = CompletionTree::default();
-        tree.insert(
-            &["git".to_string()],
-            vec![],
-            vec!["add".to_string()],
-            true,
-        );
+        tree.insert(&["git".to_string()], vec![], vec!["add".to_string()], true);
         // "add" IS in subcommands but has no child node → special placeholder response
         let result = tree.lookup(&["git", "add"]);
         assert_eq!(result, Some((vec![], vec![], true)));
@@ -164,8 +175,18 @@ mod tests {
     #[test]
     fn test_insert_overwrites_existing() {
         let tree = CompletionTree::default();
-        tree.insert(&["git".to_string()], vec!["--version".to_string()], vec![], false);
-        tree.insert(&["git".to_string()], vec!["--help".to_string()], vec![], false);
+        tree.insert(
+            &["git".to_string()],
+            vec!["--version".to_string()],
+            vec![],
+            false,
+        );
+        tree.insert(
+            &["git".to_string()],
+            vec!["--help".to_string()],
+            vec![],
+            false,
+        );
         let (flags, _, _) = tree.lookup(&["git"]).unwrap();
         assert_eq!(flags, vec!["--help".to_string()]);
     }
@@ -178,7 +199,7 @@ mod tests {
             let t = Arc::clone(&tree);
             let h = std::thread::spawn(move || {
                 if i < 2 {
-                    t.insert(&[format!("cmd{}", i)], vec![], vec![], false);
+                    t.insert(&[format!("cmd{i}")], vec![], vec![], false);
                 } else {
                     let _ = t.lookup(&[&format!("cmd{}", i - 2) as &str]);
                 }

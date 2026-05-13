@@ -8,20 +8,20 @@ pub struct Request {
 }
 
 impl Request {
-    /// Parse a key=value block (lines terminated by \n\n).
-    pub fn parse(input: &str) -> Option<Self> {
+    /// Parse a key=value block (lines terminated by `\n\n`).
+    pub fn parse(input: &str) -> Self {
         let mut map: HashMap<&str, &str> = HashMap::new();
         for line in input.lines() {
             if let Some((k, v)) = line.split_once('=') {
                 map.insert(k.trim(), v);
             }
         }
-        Some(Request {
+        Self {
             buffer: map.get("BUFFER").copied().unwrap_or("").to_string(),
             cursor: map.get("CURSOR").and_then(|s| s.parse().ok()).unwrap_or(0),
             cwd: map.get("CWD").copied().unwrap_or(".").to_string(),
             session: map.get("SESSION").and_then(|s| s.parse().ok()).unwrap_or(0),
-        })
+        }
     }
 }
 
@@ -35,24 +35,25 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn unchanged() -> Self {
-        Response {
+    pub const fn unchanged() -> Self {
+        Self {
             completions: None,
             unchanged: true,
             error: None,
         }
     }
 
-    pub fn results(completions: Vec<String>) -> Self {
-        Response {
+    pub const fn results(completions: Vec<String>) -> Self {
+        Self {
             completions: Some(completions),
             unchanged: false,
             error: None,
         }
     }
 
-    pub fn error(msg: &'static str) -> Self {
-        Response {
+    #[allow(dead_code)] // used in tests; not currently needed from binary code paths
+    pub const fn error(msg: &'static str) -> Self {
+        Self {
             completions: None,
             unchanged: false,
             error: Some(msg),
@@ -67,7 +68,7 @@ mod tests {
     #[test]
     fn test_parse_full_request() {
         let input = "BUFFER=git add\nCURSOR=7\nCWD=/home/user\nSESSION=42\n";
-        let req = Request::parse(input).unwrap();
+        let req = Request::parse(input);
         assert_eq!(req.buffer, "git add");
         assert_eq!(req.cursor, 7);
         assert_eq!(req.cwd, "/home/user");
@@ -76,32 +77,32 @@ mod tests {
 
     #[test]
     fn test_parse_missing_cursor_defaults_to_zero() {
-        let req = Request::parse("BUFFER=git\nCWD=/tmp\nSESSION=1\n").unwrap();
+        let req = Request::parse("BUFFER=git\nCWD=/tmp\nSESSION=1\n");
         assert_eq!(req.cursor, 0);
     }
 
     #[test]
     fn test_parse_invalid_cursor_defaults_to_zero() {
-        let req = Request::parse("BUFFER=git\nCURSOR=notanumber\n").unwrap();
+        let req = Request::parse("BUFFER=git\nCURSOR=notanumber\n");
         assert_eq!(req.cursor, 0);
     }
 
     #[test]
     fn test_parse_missing_cwd_defaults_to_dot() {
-        let req = Request::parse("BUFFER=git\nCURSOR=0\nSESSION=1\n").unwrap();
+        let req = Request::parse("BUFFER=git\nCURSOR=0\nSESSION=1\n");
         assert_eq!(req.cwd, ".");
     }
 
     #[test]
     fn test_parse_missing_session_defaults_to_zero() {
-        let req = Request::parse("BUFFER=git\nCURSOR=0\nCWD=/tmp\n").unwrap();
+        let req = Request::parse("BUFFER=git\nCURSOR=0\nCWD=/tmp\n");
         assert_eq!(req.session, 0);
     }
 
     #[test]
     fn test_parse_buffer_with_equals_sign() {
         // split_once('=') only splits on the first '=' — value may contain '='
-        let req = Request::parse("BUFFER=git commit -m=fix\n").unwrap();
+        let req = Request::parse("BUFFER=git commit -m=fix\n");
         assert_eq!(req.buffer, "git commit -m=fix");
     }
 
@@ -115,7 +116,8 @@ mod tests {
 
     #[test]
     fn test_response_results_serialization() {
-        let json = serde_json::to_string(&Response::results(vec!["add".into(), "commit".into()])).unwrap();
+        let json =
+            serde_json::to_string(&Response::results(vec!["add".into(), "commit".into()])).unwrap();
         assert!(json.contains("\"completions\""));
         assert!(json.contains("\"add\""));
         assert!(json.contains("\"unchanged\":false"));

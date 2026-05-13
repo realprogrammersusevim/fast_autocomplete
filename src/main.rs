@@ -30,11 +30,12 @@ fn socket_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("FAST_AUTOCOMPLETE_SOCKET") {
         return std::path::PathBuf::from(p);
     }
-    let tmpdir = std::env::var("TMPDIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let tmpdir = std::env::var("TMPDIR").map_or_else(
+        |_| std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from,
+    );
     let uid = unsafe { libc::getuid() };
-    tmpdir.join(format!("fast_autocomplete_{}.sock", uid))
+    tmpdir.join(format!("fast_autocomplete_{uid}.sock"))
 }
 
 fn lock_path() -> std::path::PathBuf {
@@ -72,12 +73,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Acquire exclusive lock before touching the socket — prevents the TOCTOU
     // race where concurrent startups each see no socket and all try to bind.
-    let _lock = match try_acquire_lock()? {
-        Some(f) => f,
-        None => {
-            log::info!("daemon already running (lock held by another process)");
-            return Ok(());
-        }
+    let Some(_lock) = try_acquire_lock()? else {
+        log::info!("daemon already running (lock held by another process)");
+        return Ok(());
     };
 
     let path = socket_path();
@@ -88,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listener = tokio::net::UnixListener::bind(&path)?;
-    log::info!("listening on {:?}", path);
+    log::info!("listening on {}", path.display());
 
     let state = Arc::new(SharedState {
         tree: Arc::new(cache::CompletionTree::default()),
@@ -107,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
                 Ok(Ok(names)) => {
                     let _ = state.cmd_names.set(names);
                 }
-                Ok(Err(e)) => log::error!("list_commands failed: {}", e),
-                Err(e) => log::error!("list_commands panicked: {}", e),
+                Ok(Err(e)) => log::error!("list_commands failed: {e}"),
+                Err(e) => log::error!("list_commands panicked: {e}"),
             }
         });
     }
@@ -126,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                         let state = Arc::clone(&state);
                         tokio::spawn(socket::handle_connection(stream, state));
                     }
-                    Err(e) => log::error!("accept error: {}", e),
+                    Err(e) => log::error!("accept error: {e}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => break,

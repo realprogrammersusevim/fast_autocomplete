@@ -44,15 +44,15 @@ fn resolve_dir(cwd: &Path, dir_part: &str) -> PathBuf {
     if dir_part.starts_with('/') {
         return PathBuf::from(dir_part);
     }
-    if let Some(rest) = dir_part.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = dir_part.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
-    if dir_part == "~" || dir_part == "~/" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
-        }
+    if (dir_part == "~" || dir_part == "~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home);
     }
     cwd.join(dir_part)
 }
@@ -121,7 +121,10 @@ mod tests {
         let partial = format!("{}/", dir.path().display());
         let result = list_files(Path::new("/irrelevant"), &partial);
         let expected = format!("{}/alpha.txt", dir.path().display());
-        assert!(result.contains(&expected), "expected {:?} in {:?}", expected, result);
+        assert!(
+            result.contains(&expected),
+            "expected {expected:?} in {result:?}"
+        );
     }
 
     #[test]
