@@ -149,7 +149,7 @@ _fa_update_below() {
     return
   fi
 
-  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$$")
+  response=$(_fa_query "$sock" "$BUFFER" "$CURSOR" "$PWD" "$(( $$ + 1000000 ))")
   [[ -z $response ]] && return
 
   # unchanged:true means completions are the same — keep the current display.

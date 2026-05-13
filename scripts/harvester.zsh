@@ -200,8 +200,10 @@ _hv_run_func() {
                         list="${action#(}"; list="${list%)}";
                         for v in ${=list}; do [[ -n $v ]] && print -r -- "ITEM:${v}"; done ;;
                     _*|__*)
-                        # Call function-based actions (e.g. __brew_internal_commands)
-                        (( ${+functions[$action]} )) && "$action" 2>/dev/null ;;
+                        # Action may include arguments (e.g. "_path_files -/"), so split
+                        # into function name + args before checking existence and calling.
+                        local _alt_func="${action%% *}"
+                        (( ${+functions[$_alt_func]} )) && ${=action} 2>/dev/null ;;
                 esac
             done
         }
