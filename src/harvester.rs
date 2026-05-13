@@ -27,6 +27,22 @@ struct HarvesterLine {
     wants_files: bool,
 }
 
+const ZSH_BUILTINS: &[&str] = &[
+    ".", ":", "[", "alias", "autoload", "bg", "bindkey", "break", "builtin", "bye",
+    "cd", "chdir", "command", "compctl", "compdump", "compfiles", "compgroups",
+    "compinit", "complist", "compquote", "comptags", "comptry", "compvalues",
+    "continue", "declare", "dirs", "disable", "disown", "echo", "echotc", "echoti",
+    "emulate", "enable", "eval", "exec", "exit", "export", "false", "fc", "fg",
+    "float", "functions", "getln", "getopts", "glob", "hash", "history",
+    "integer", "jobs", "kill", "let", "limit", "local", "log", "logout",
+    "popd", "print", "printf", "pushd", "pushln", "pwd", "read", "readonly",
+    "rehash", "return", "sched", "set", "setopt", "shift", "source", "stat",
+    "suspend", "test", "time", "times", "trap", "true", "ttyctl", "type",
+    "typeset", "ulimit", "umask", "unalias", "unfunction", "unhash", "unlimit",
+    "unset", "unsetopt", "vared", "wait", "whence", "where", "which", "zcompile",
+    "zformat", "zle", "zmodload", "zparseopts", "zregexparse", "zstat", "zstyle",
+];
+
 /// Return the sorted list of all known command names without running any completion functions.
 /// Intended to run once at startup in a spawn_blocking task.
 pub fn list_commands() -> anyhow::Result<Vec<String>> {
@@ -43,8 +59,10 @@ pub fn list_commands() -> anyhow::Result<Vec<String>> {
         .filter_map(|l| l.ok())
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
+        .chain(ZSH_BUILTINS.iter().map(|s| s.to_string()))
         .collect();
     cmds.sort_unstable();
+    cmds.dedup();
     log::info!("listed {} known commands", cmds.len());
     Ok(cmds)
 }
