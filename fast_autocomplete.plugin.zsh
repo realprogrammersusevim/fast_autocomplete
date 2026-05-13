@@ -169,6 +169,7 @@ _fast_autocomplete() {
 # --------------------------------------------------------------------------- #
 
 typeset -g _FA_PREV_BUFFER_DISPLAY=''
+typeset -ga _FA_LAST_DISPLAY_COMPLETIONS
 
 _fa_update_below() {
   # Skip when there are pending keystrokes — avoids blocking mid-rapid-type
@@ -196,21 +197,29 @@ _fa_update_below() {
   response=$(_fa_query "$sock" "$_fa_buffer" "$_fa_cursor" "$PWD" "$(( $$ + 1000000 ))")
   [[ -z $response ]] && return
 
-  # unchanged:true means completions are the same — keep the current display.
-  [[ $response == *'"unchanged":true'* ]] && return
-
   local -a completions
-  if (( $+commands[jq] )); then
-    completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
-  else
-    local raw=${response#*'"completions":['}
-    raw=${raw%%\]*}
-    completions=( ${(s:,:)${raw//\"/}} )
-  fi
 
-  if (( ${#completions} == 0 )); then
-    zle -M ''
-    return
+  # unchanged:true means the daemon's cached list is current — re-render it.
+  # The display may have been cleared by _fa_clear_below even though the list
+  # hasn't changed (e.g. user ran a command then retyped the same input).
+  if [[ $response == *'"unchanged":true'* ]]; then
+    (( ${#_FA_LAST_DISPLAY_COMPLETIONS} == 0 )) && return
+    completions=( "${_FA_LAST_DISPLAY_COMPLETIONS[@]}" )
+  else
+    if (( $+commands[jq] )); then
+      completions=( ${(f)"$(jq -r '.completions[]? // empty' <<< "$response" 2>/dev/null)"} )
+    else
+      local raw=${response#*'"completions":['}
+      raw=${raw%%\]*}
+      completions=( ${(s:,:)${raw//\"/}} )
+    fi
+
+    if (( ${#completions} == 0 )); then
+      zle -M ''
+      return
+    fi
+
+    _FA_LAST_DISPLAY_COMPLETIONS=( "${completions[@]}" )
   fi
 
   # Format completions into aligned columns, capped at max_rows display lines.
