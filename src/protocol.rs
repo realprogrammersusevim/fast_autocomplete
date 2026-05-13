@@ -36,14 +36,26 @@ pub struct Response {
 
 impl Response {
     pub fn unchanged() -> Self {
-        Response { completions: None, unchanged: true, error: None }
+        Response {
+            completions: None,
+            unchanged: true,
+            error: None,
+        }
     }
 
     pub fn results(completions: Vec<String>) -> Self {
-        Response { completions: Some(completions), unchanged: false, error: None }
+        Response {
+            completions: Some(completions),
+            unchanged: false,
+            error: None,
+        }
     }
 
     pub fn error(msg: &'static str) -> Self {
-        Response { completions: None, unchanged: false, error: Some(msg) }
+        Response {
+            completions: None,
+            unchanged: false,
+            error: Some(msg),
+        }
     }
 }

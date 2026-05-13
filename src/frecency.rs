@@ -12,14 +12,19 @@ pub struct FrecencyStore {
 
 impl FrecencyStore {
     pub fn new() -> Self {
-        FrecencyStore { entries: HashMap::new() }
+        FrecencyStore {
+            entries: HashMap::new(),
+        }
     }
 
     pub fn record(&mut self, completion: &str) {
-        let entry = self.entries.entry(completion.to_string()).or_insert(FrecencyEntry {
-            count: 0,
-            last_used: Instant::now(),
-        });
+        let entry = self
+            .entries
+            .entry(completion.to_string())
+            .or_insert(FrecencyEntry {
+                count: 0,
+                last_used: Instant::now(),
+            });
         entry.count += 1;
         entry.last_used = Instant::now();
     }

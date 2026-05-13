@@ -28,7 +28,11 @@ impl CompletionTree {
                 None => break,
             }
         }
-        Some((node.flags.clone(), node.subcommands.clone(), node.wants_files))
+        Some((
+            node.flags.clone(),
+            node.subcommands.clone(),
+            node.wants_files,
+        ))
     }
 
     /// Insert a node at the given path, creating intermediate nodes as needed.

@@ -22,7 +22,10 @@ pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
     } else {
         let current_word = words.last().cloned().unwrap_or_default();
         let lookup_words = words[..words.len() - 1].to_vec();
-        ParsedBuffer { lookup_words, current_word }
+        ParsedBuffer {
+            lookup_words,
+            current_word,
+        }
     }
 }
 
@@ -92,7 +95,10 @@ mod tests {
 
     #[test]
     fn test_quoted() {
-        assert_eq!(split_shell_words("echo 'hello world'"), vec!["echo", "hello world"]);
+        assert_eq!(
+            split_shell_words("echo 'hello world'"),
+            vec!["echo", "hello world"]
+        );
     }
 
     #[test]

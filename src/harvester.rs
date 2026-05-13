@@ -75,7 +75,11 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
             .spawn()?,
     );
 
-    let stdout = child.0.stdout.take().ok_or_else(|| anyhow::anyhow!("no stdout"))?;
+    let stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("no stdout"))?;
     let reader = BufReader::new(stdout);
     let mut count = 0usize;
 
@@ -86,7 +90,12 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         };
         match serde_json::from_str::<HarvesterLine>(&line) {
             Ok(entry) => {
-                tree.insert(&entry.path, entry.flags, entry.subcommands, entry.wants_files);
+                tree.insert(
+                    &entry.path,
+                    entry.flags,
+                    entry.subcommands,
+                    entry.wants_files,
+                );
                 count += 1;
             }
             Err(e) => {

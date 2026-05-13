@@ -82,9 +82,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     // Accept loop — exits cleanly on SIGINT or SIGTERM so that spawn_blocking
     // threads (and their KillOnDrop child guards) run to completion instead of

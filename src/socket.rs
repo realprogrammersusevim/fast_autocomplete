@@ -4,7 +4,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::protocol::{Request, Response};
-use crate::{files, harvester, ranking, SharedState};
+use crate::{SharedState, files, harvester, ranking};
 
 /// Handle one incoming connection: read a single request block, respond, close.
 pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
