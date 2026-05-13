@@ -2,16 +2,18 @@ use crate::frecency::FrecencyStore;
 
 /// Merge static cache completions and file completions, prefix-filter, deduplicate,
 /// and sort by frecency then type (non-flags before flags) then alphabetically.
+/// Flags (items starting with `-`) are only included when `current_word` starts with `-`.
 pub fn rank_completions(
     static_items: Vec<String>,
     file_items: Vec<String>,
     current_word: &str,
     frecency: &FrecencyStore,
 ) -> Vec<String> {
+    let typing_flag = current_word.starts_with('-');
     let mut all: Vec<String> = static_items
         .into_iter()
         .chain(file_items)
-        .filter(|s| s.starts_with(current_word))
+        .filter(|s| s.starts_with(current_word) && (typing_flag || !s.starts_with('-')))
         .collect();
 
     all.sort();
