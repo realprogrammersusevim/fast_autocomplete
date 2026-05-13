@@ -1,6 +1,11 @@
-use crate::frecency::FrecencyStore;
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+
+static MATCHER: LazyLock<SkimMatcherV2> =
+    LazyLock::new(|| SkimMatcherV2::default().smart_case());
 
 /// Merge static cache completions and file completions, fuzzy-filter, deduplicate,
 /// and sort by combined fuzzy+frecency score, then type (non-flags before flags), then alpha.
@@ -9,7 +14,7 @@ pub fn rank_completions(
     static_items: Vec<String>,
     file_items: Vec<String>,
     current_word: &str,
-    frecency: &FrecencyStore,
+    frecency_scores: &HashMap<String, f64>,
 ) -> Vec<String> {
     let typing_flag = current_word.starts_with('-');
 
@@ -22,12 +27,12 @@ pub fn rank_completions(
     all.sort();
     all.dedup();
 
-    let matcher = SkimMatcherV2::default().smart_case();
+    let freq = |s: &str| frecency_scores.get(s).copied().unwrap_or(0.0);
 
     let mut scored: Vec<(f64, bool, String)> = if current_word.is_empty() {
         all.into_iter()
             .map(|s| {
-                let score = frecency.score(&s);
+                let score = freq(&s);
                 let is_flag = s.starts_with('-');
                 (score, is_flag, s)
             })
@@ -35,10 +40,9 @@ pub fn rank_completions(
     } else {
         all.into_iter()
             .filter_map(|s| {
-                matcher.fuzzy_match(&s, current_word).map(|fuzzy_score| {
-                    let freq = frecency.score(&s);
+                MATCHER.fuzzy_match(&s, current_word).map(|fuzzy_score| {
                     // Frecency dominates; fuzzy score breaks ties among zero-frecency items.
-                    let combined = freq * 100.0 + fuzzy_score as f64;
+                    let combined = freq(&s) * 100.0 + fuzzy_score as f64;
                     let is_flag = s.starts_with('-');
                     (combined, is_flag, s)
                 })
