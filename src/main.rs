@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use dashmap::DashMap;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Notify, RwLock};
 
 pub struct SharedState {
     pub tree: Arc<cache::CompletionTree>,
@@ -24,7 +24,9 @@ pub struct SharedState {
     /// Commands whose harvest has fully completed and whose nodes are in `tree`.
     pub harvested: DashMap<String, ()>,
     pub sessions: DashMap<u64, session::SessionState>,
-    pub frecency: Mutex<frecency::FrecencyStore>,
+    /// `RwLock` so concurrent score reads don't serialize. Writes (`record`) are rare —
+    /// only fire when the user actually accepts a completion.
+    pub frecency: RwLock<frecency::FrecencyStore>,
     /// Kicked when the frecency store has been mutated; a background task
     /// debounces these kicks and persists the store to disk.
     pub frecency_dirty: Notify,
@@ -92,7 +94,7 @@ fn main() {
             client::run_display(&path, cols);
         }
         Some("--record") => {
-            let value = args.get(2).map(String::as_str).unwrap_or("");
+            let value = args.get(2).map_or("", String::as_str);
             client::run_record(&path, value);
         }
         _ => {
@@ -136,7 +138,7 @@ async fn daemon_main() -> anyhow::Result<()> {
         harvest_channels: DashMap::new(),
         harvested: DashMap::new(),
         sessions: DashMap::new(),
-        frecency: Mutex::new(frecency::FrecencyStore::load(&frecency_path)),
+        frecency: RwLock::new(frecency::FrecencyStore::load(&frecency_path)),
         frecency_dirty: Notify::new(),
     });
 
@@ -149,7 +151,7 @@ async fn daemon_main() -> anyhow::Result<()> {
             loop {
                 state.frecency_dirty.notified().await;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let mut snapshot = state.frecency.lock().await;
+                let mut snapshot = state.frecency.write().await;
                 if let Err(e) = snapshot.save(&path) {
                     log::warn!("frecency: save to {} failed: {e}", path.display());
                 }
@@ -213,7 +215,7 @@ async fn daemon_main() -> anyhow::Result<()> {
 
     // Final flush: persist any pending frecency updates before exit.
     {
-        let mut frecency = state.frecency.lock().await;
+        let mut frecency = state.frecency.write().await;
         if let Err(e) = frecency.save(&frecency_path) {
             log::warn!("frecency: final save to {} failed: {e}", frecency_path.display());
         }

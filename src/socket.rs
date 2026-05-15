@@ -29,7 +29,8 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
 
     let response = process_request(&block, &state).await;
     if let Ok(json) = serde_json::to_string(&response) {
-        let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+        let _ = writer.write_all(json.as_bytes()).await;
+        let _ = writer.write_all(b"\n").await;
     }
 }
 
@@ -63,7 +64,7 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     let req = Request::parse(raw);
 
     if let Some(value) = req.record {
-        state.frecency.lock().await.record(&value);
+        state.frecency.write().await.record(&value);
         state.frecency_dirty.notify_one();
         return Response::unchanged();
     }
@@ -76,32 +77,38 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         ensure_harvested(cmd, state);
     }
 
-    let (static_items, wants_files) = if parsed.lookup_words.is_empty() {
+    // Static items as up to two slices — flags and subcommands are stored
+    // behind `Arc<[String]>` in `CompletionTree`, so we clone the Arc (one
+    // atomic op) instead of copying every String.
+    let (flags, subs, wants_files, cmd_fallback) = if parsed.lookup_words.is_empty() {
         // Completing the command name itself — return all known command names.
         let cmds = match state.cmd_names.get() {
             Some(names) => names.clone(),
             None => state.tree.roots.iter().map(|e| e.key().clone()).collect(),
         };
-        (cmds, true)
+        (None, None, true, Some(cmds))
     } else {
         let word_refs: Vec<&str> = parsed.lookup_words.iter().map(String::as_str).collect();
         match state.tree.lookup(&word_refs) {
-            Some((flags, subs, wants_files)) => {
-                let mut items = flags;
-                items.extend(subs);
-                (items, wants_files)
-            }
-            None => (vec![], true), // unknown command — fall back to files
+            Some((f, s, w)) => (Some(f), Some(s), w, None),
+            None => (None, None, true, None), // unknown command — fall back to files
         }
     };
+
+    let empty: &[String] = &[];
+    let flags_slice: &[String] = flags.as_deref().unwrap_or(empty);
+    let subs_slice: &[String] = subs.as_deref().unwrap_or(empty);
+    let cmd_slice: &[String] = cmd_fallback.as_deref().unwrap_or(empty);
 
     // Also include files when no static item would survive ranking. Flags are
     // filtered out unless the user is typing one, so a node with only flags and
     // wants_files=false (e.g. harvester mis-tagged grep) would otherwise return
     // nothing. Files are better than an empty list.
     let typing_flag = parsed.current_word.starts_with('-');
-    let has_usable_static = static_items
+    let has_usable_static = flags_slice
         .iter()
+        .chain(subs_slice.iter())
+        .chain(cmd_slice.iter())
         .any(|s| typing_flag || !s.starts_with('-'));
     let effective_wants_files = wants_files || !has_usable_static;
     let file_items = if effective_wants_files {
@@ -110,22 +117,32 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         vec![]
     };
 
-    // Snapshot only the scores we need, then release the lock before the CPU-heavy ranking.
-    let frecency_scores = {
-        let frecency = state.frecency.lock().await;
-        static_items
-            .iter()
-            .chain(file_items.iter())
-            .map(|s| (s.clone(), frecency.score(s)))
-            .collect::<std::collections::HashMap<String, f64>>()
+    // Merge static items into one slice for ranking. We allocate a single
+    // `Vec<String>` here only if both flags and subcommands are non-empty; in
+    // the common case (one of them empty), we pass the non-empty slice directly.
+    let static_buf: Vec<String>;
+    let static_slice: &[String] = if !cmd_slice.is_empty() {
+        cmd_slice
+    } else if subs_slice.is_empty() {
+        flags_slice
+    } else if flags_slice.is_empty() {
+        subs_slice
+    } else {
+        static_buf = flags_slice.iter().chain(subs_slice.iter()).cloned().collect();
+        &static_buf
     };
 
+    // Hold the read lock across ranking so we don't snapshot scores into a
+    // HashMap upfront. Read locks don't block other readers, and `record`
+    // writes are rare (only on tab acceptance).
+    let frecency = state.frecency.read().await;
     let completions = ranking::rank_completions(
-        static_items,
-        file_items,
+        static_slice,
+        &file_items,
         &parsed.current_word,
-        &frecency_scores,
+        |s| frecency.score(s),
     );
+    drop(frecency);
 
     let mut session = state.sessions.entry(req.session).or_default();
     session.last_seen = std::time::Instant::now();
@@ -150,7 +167,7 @@ mod tests {
             harvest_channels: DashMap::new(),
             harvested: DashMap::new(),
             sessions: DashMap::new(),
-            frecency: tokio::sync::Mutex::new(crate::frecency::FrecencyStore::new()),
+            frecency: tokio::sync::RwLock::new(crate::frecency::FrecencyStore::new()),
             frecency_dirty: tokio::sync::Notify::new(),
         })
     }
@@ -253,17 +270,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::float_cmp)]
     async fn test_record_request_updates_frecency() {
         let state = make_state();
         // Score starts at zero.
-        assert_eq!(state.frecency.lock().await.score("commit"), 0.0);
+        assert_eq!(state.frecency.read().await.score("commit"), 0.0);
         // Send a RECORD request.
         let response = process_request("RECORD=commit\n\n", &state).await;
         assert!(response.unchanged);
         // Frecency for "commit" should now be positive.
-        assert!(state.frecency.lock().await.score("commit") > 0.0);
+        assert!(state.frecency.read().await.score("commit") > 0.0);
         // Unrelated item is unchanged.
-        assert_eq!(state.frecency.lock().await.score("push"), 0.0);
+        assert_eq!(state.frecency.read().await.score("push"), 0.0);
     }
 
     #[tokio::test]

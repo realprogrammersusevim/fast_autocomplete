@@ -79,7 +79,7 @@ fn format_columns(completions: &[String], term_width: usize) -> String {
     const MAX_ROWS: usize = 8;
     const MAX_SHOWN_INIT: usize = 40;
 
-    let max_len = completions.iter().map(|s| s.len()).max().unwrap_or(0);
+    let max_len = completions.iter().map(String::len).max().unwrap_or(0);
     let col_width = (max_len + 2).max(1);
     let num_cols = (term_width / col_width).max(1);
     let max_shown = (num_cols * MAX_ROWS).min(MAX_SHOWN_INIT);
@@ -103,8 +103,9 @@ fn format_columns(completions: &[String], term_width: usize) -> String {
     }
 
     if completions.len() > max_shown {
+        use std::fmt::Write;
         let more = completions.len() - max_shown;
-        output.push_str(&format!("\n  \u{2026} ({more} more, press Tab to browse)"));
+        write!(output, "\n  \u{2026} ({more} more, press Tab to browse)").unwrap();
     }
 
     output

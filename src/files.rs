@@ -29,7 +29,12 @@ pub fn list_files(cwd: &Path, partial: &str) -> Vec<String> {
         }
 
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let display = format!("{}{}{}", dir_part, name_str, if is_dir { "/" } else { "" });
+        let mut display = String::with_capacity(dir_part.len() + name_str.len() + usize::from(is_dir));
+        display.push_str(dir_part);
+        display.push_str(&name_str);
+        if is_dir {
+            display.push('/');
+        }
         results.push(display);
     }
 

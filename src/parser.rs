@@ -7,7 +7,7 @@ pub struct ParsedBuffer {
 
 pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
     let relevant = &buffer[..cursor.min(buffer.len())];
-    let words = split_shell_words(relevant);
+    let mut words = split_shell_words(relevant);
     let cursor_after_space = relevant.chars().last().is_some_and(char::is_whitespace);
 
     if cursor_after_space || words.is_empty() {
@@ -16,10 +16,9 @@ pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
             current_word: String::new(),
         }
     } else {
-        let current_word = words.last().cloned().unwrap_or_default();
-        let lookup_words = words[..words.len() - 1].to_vec();
+        let current_word = words.pop().unwrap_or_default();
         ParsedBuffer {
-            lookup_words,
+            lookup_words: words,
             current_word,
         }
     }

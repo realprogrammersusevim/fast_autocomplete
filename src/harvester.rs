@@ -169,6 +169,12 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         }
     }
 
+    // Hard cap on nodes ingested per command. Real-world harvests emit at most a
+    // few hundred; anything larger is a pathological completion definition (or
+    // a runaway recursion) and would balloon the tree without improving UX.
+    // The KillOnDrop guard on `child` reaps the subprocess once we break.
+    const MAX_NODES: usize = 5_000;
+
     let script_path = std::env::temp_dir().join("fast_ac_harvester.zsh");
     std::fs::write(&script_path, HARVESTER_SCRIPT)?;
 
@@ -188,11 +194,6 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no stdout"))?;
     let reader = BufReader::new(stdout);
     let mut count = 0usize;
-    // Hard cap on nodes ingested per command. Real-world harvests emit at most a
-    // few hundred; anything larger is a pathological completion definition (or
-    // a runaway recursion) and would balloon the tree without improving UX.
-    // The KillOnDrop guard on `child` reaps the subprocess once we break.
-    const MAX_NODES: usize = 5_000;
 
     for line in reader.lines() {
         let line = match line {

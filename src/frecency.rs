@@ -194,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_compact_prunes_stale_low_score_entries() {
         let mut store = FrecencyStore::new();
         // Idle 31d with score 1.0 → decayed ≈ exp(-31/7) ≈ 0.012 → pruned.
@@ -224,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn test_save_compacts_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("frecency.bin");
