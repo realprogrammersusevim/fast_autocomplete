@@ -93,10 +93,15 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         }
     };
 
-    // Also include files when static_items is empty — if the tree node exists but
-    // produced no usable completions (harvester limitation, stale data, etc.),
-    // files are better than nothing.
-    let effective_wants_files = wants_files || static_items.is_empty();
+    // Also include files when no static item would survive ranking. Flags are
+    // filtered out unless the user is typing one, so a node with only flags and
+    // wants_files=false (e.g. harvester mis-tagged grep) would otherwise return
+    // nothing. Files are better than an empty list.
+    let typing_flag = parsed.current_word.starts_with('-');
+    let has_usable_static = static_items
+        .iter()
+        .any(|s| typing_flag || !s.starts_with('-'));
+    let effective_wants_files = wants_files || !has_usable_static;
     let file_items = if effective_wants_files {
         files::list_files(cwd, &parsed.current_word)
     } else {
@@ -218,6 +223,30 @@ mod tests {
         assert!(!response.unchanged);
         let completions = response.completions.unwrap_or_default();
         assert!(completions.contains(&"myfile.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_known_command_only_flags_falls_back_to_files() {
+        // grep-style: node has flags but no subcommands, wants_files=false (harvester
+        // mis-tag). When the user isn't typing a flag, flags get filtered out by
+        // ranking — we must still surface files instead of returning nothing.
+        let state = make_state();
+        state.tree.insert(
+            &["grepish".to_string()],
+            vec!["-i".to_string(), "--color".to_string()],
+            vec![],
+            false,
+        );
+        state.harvested.insert("grepish".to_string(), ());
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        std::fs::File::create(tmpdir.path().join("data.txt")).unwrap();
+        let req = format!(
+            "BUFFER=grepish \nCURSOR=8\nCWD={}\nSESSION=6\n",
+            tmpdir.path().display()
+        );
+        let response = process_request(&req, &state).await;
+        let completions = response.completions.unwrap_or_default();
+        assert!(completions.contains(&"data.txt".to_string()));
     }
 
     #[tokio::test]
