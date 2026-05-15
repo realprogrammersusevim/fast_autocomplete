@@ -1,1 +1,1 @@
-{"path":["grep"],"flags":["-b","-c","-E","-F","-h","-i","-l","-n","-q","-s","-v","-w","-x"],"subcommands":[],"wants_files":true}
+{"path":["grep"],"flags":["-b","-c","-e","-E","-F","-h","-i","-l","-n","-q","-s","-v","-w","-x"],"subcommands":[],"wants_files":true}
