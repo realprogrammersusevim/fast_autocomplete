@@ -1,15 +1,43 @@
 #!/bin/zsh
-# Harvests completions for all commands known to zsh's completion system.
+# Harvests completions for a single command via real zsh compsys.
 # Outputs NDJSON to stdout: one object per completion node.
-# Called once at daemon startup.
+#
+# Architecture: spawn an interactive zsh inside a zpty, override compadd
+# to capture matches instead of inserting them into a line editor display,
+# then drive completion by typing each command path followed by TAB.
+# Real compsys (compinit, _arguments, _describe, _files, ...) runs unmodified,
+# so dispatch (e.g. _git -> _git-commit) and spec parsing are accurate.
 
 emulate -L zsh
-setopt extendedglob nullglob no_aliases
+setopt extendedglob nullglob no_aliases pipefail
+zmodload zsh/zpty 2>/dev/null || { print -u2 "zpty module unavailable"; exit 1; }
 
-autoload -Uz compinit
-compinit -d "${TMPDIR:-/tmp}/fast_ac_compdump" -C 2>/dev/null
+local TARGET=${1:-}
+[[ -z $TARGET ]] && { print -u2 "usage: harvester.zsh <command>"; exit 1; }
+[[ $TARGET == -* ]] && exit 0
+[[ $TARGET == *[\ \(\)\[\]\{\}]* ]] && exit 0
+# Skip commands the shell doesn't know about. Otherwise zsh's fallback
+# _complete still emits a generic flag list, producing misleading output
+# for misspellings / removed tools.
+whence -- "$TARGET" >/dev/null 2>&1 || exit 0
+
+local COMPDUMP="${TMPDIR:-/tmp}/fast_ac_compdump_zpty"
+local MAX_ITEMS_PER_NODE=500
+# Wall-clock budget. Slow completers (`_man` enumerating every command on PATH,
+# `_brew` listing every formula) can spend several seconds inside a single
+# `zpty -r`, which is uninterruptible — SIGALRM/TRAPALRM don't fire while it
+# blocks. Cooperative checks between probes (see _hv_node) bound the recursive
+# fan-out. As a hard backstop, fork a watchdog that SIGKILLs us if even the
+# first probe never returns.
+local MAX_ELAPSED_SECONDS=15
+
+(
+    sleep $MAX_ELAPSED_SECONDS
+    kill -KILL $$ 2>/dev/null
+) &!
 
 typeset -gA _HV_SEEN
+typeset -gi _HV_DEADLINE=$(( SECONDS + MAX_ELAPSED_SECONDS ))
 
 _hv_json_escape() {
     local s=$1
@@ -21,9 +49,7 @@ _hv_json_escape() {
 _hv_json_arr() {
     local -aU items=("$@")
     items=("${(o)items[@]}")
-    local out="["
-    local first=1
-    local item
+    local out="[" first=1 item
     for item in "${items[@]}"; do
         [[ -z $item ]] && continue
         (( first )) || out+=","
@@ -34,301 +60,206 @@ _hv_json_arr() {
     print -rn -- "$out"
 }
 
-# Run a completion function and capture its output, with a hard timeout.
-# Prints tagged lines: FLAG:<name>, ITEM:<name>, FILE:
-# Args: comp_func cmd_word [subcmd_word...]
-_hv_run_func() {
-    local comp_func=$1
-    shift
-    local -a cmd_words=("$@")
-    local top="${cmd_words[1]}"
+# ---- worker setup ----------------------------------------------------------
+# Spawn one persistent interactive zsh; route all probes through it.
+# Disable bracketed-paste (-z) ahead of time via TERM=dumb to keep the capture
+# stream free of escape sequences.
+TERM=dumb zpty -b _hv zsh -if 2>/dev/null
+sleep 0.2
 
-    # Run in a subshell for isolation. ALARM=1 + TRAPALRM inside interrupts
-    # the completion function after 1 second without spawning extra processes.
-    (
-        # compadd: intercept items being added to the completion list.
-        compadd() {
-            print -r -- "DEBUG: compadd called with $@" >&2
-            local f=0 skip=0 past=0 i a
-            for (( i = 1; i <= $#; i++ )); do
-                a=${@[$i]}
-                (( skip )) && { skip=0; continue; }
-                if (( past )); then
-                    [[ -n $a ]] && print -r -- "ITEM:${a}"
-                    continue
-                fi
-                case $a in
-                    --) past=1 ;;
-                    -f|-F) f=1 ;;
-                    -a)
-                        # Skip optional '--' separator before array name(s)
-                        local _next_i=$(( i + 1 ))
-                        [[ ${@[$_next_i]} == '--' ]] && (( i++ ))
-                        (( i++ ))
-                        local -a _arr=("${(@P)${@[$i]}}")
-                        for x in "${_arr[@]}"; do
-                            [[ -n $x ]] && print -r -- "ITEM:${x}"
-                        done
-                        ;;
-                    -k)
-                        (( i++ ))
-                        local -a _keys=("${(@Pk)${@[$i]}}")
-                        for x in "${_keys[@]}"; do
-                            [[ -n $x ]] && print -r -- "ITEM:${x}"
-                        done
-                        ;;
-                    # Options that consume the next argument
-                    -d|-J|-V|-X|-M|-P|-S|-r|-R|-p|-s|-o|-W|-i|-I|-t|-n|-e|-2|-1|-l|-E|-O) skip=1 ;;
-                esac
-            done
-            (( f )) && print -- "FILE:"
-        }
-
-        # _arguments: parse specs to extract flags, literal value lists, and state names.
-        # When -C is present, set $state only for the ->state spec whose positional
-        # index matches CURRENT so the caller dispatches to the right handler.
-        # Return 1 when state is set so that "... && return" guards in callers don't fire.
-        _arguments() {
-            print -r -- "DEBUG: _arguments called with $@" >&2
-            local _has_C=0 spec bare flag action list v
-            # Argument position being completed (1 = first arg after command name).
-            local _cur_pos=$(( CURRENT - 1 ))
-            local _seq=0  # counter for unnumbered positional specs
-            [[ ${@[(r)-C]} == -C ]] && _has_C=1
-
-            for spec in "$@"; do
-                [[ $spec == -[sSCwARO] ]] && continue
-                [[ $spec == -- ]] && continue
-
-                bare="$spec"
-                [[ $bare == \(*\)* ]] && bare="${bare#\(*\)}"
-                [[ $bare == [+\!]* ]] && bare="${bare#[+\!]}"
-
-                if [[ $bare == [-+]* ]]; then
-                    flag="${bare%%[\[:= ]*}"
-                    [[ $flag == -* ]] && [[ ${#flag} -ge 2 ]] && print -r -- "FLAG:${flag}"
-                fi
-
-                if [[ $spec == *:* ]]; then
-                    action="${spec##*:}"
-
-                    # Resolve whether this positional spec applies at _cur_pos.
-                    local _is_pos=0 _pos_match=0
-                    if [[ $bare != [-+]* ]]; then
-                        _is_pos=1
-                        local _head="${bare%%:*}"
-                        if [[ $_head == <-> ]]; then
-                            # Explicitly numbered: '1:msg:action'
-                            (( _head == _cur_pos )) && _pos_match=1
-                        elif [[ $_head == '#' ]]; then
-                            # Numeric argument: treat like unnumbered positional
-                            (( ++_seq == _cur_pos )) && _pos_match=1
-                        elif [[ $_head == '*' || $_head == '**' ]]; then
-                            # Catch-all: matches any remaining position
-                            _pos_match=1
-                        else
-                            # Unnumbered positional: '::msg:action' or ':msg:action'
-                            (( ++_seq == _cur_pos )) && _pos_match=1
-                        fi
-                    fi
-
-                    case $action in
-                        _files|_path_files|_globbed_files|_absolute_path|_file_absolute)
-                            print -- "FILE:" ;;
-                        _directories|_dir_list|_path_dirs)
-                            print -- "FILE:" ;;
-                        \(*\))
-                            list="${action#(}"
-                            list="${list%)}"
-                            for v in ${=list}; do
-                                [[ -n $v ]] && print -r -- "ITEM:${v}"
-                            done
-                            ;;
-                        -\>*)
-                            # Only dispatch state machine for the spec that matches CURRENT.
-                            if (( _has_C && _is_pos && _pos_match )) && [[ -z $state ]]; then
-                                state="${action#->}"
-                                print -r -- "DEBUG: _arguments set state to $state" >&2
-                                # Emit FILE: now for catch-all positionals (head == * or **).
-                                # Completion functions like _rm use '*:: :->file' then call
-                                # _files in their case block, but that block is unreachable here
-                                # because '_rm' re-declares 'line' as a scalar and the subsequent
-                                # 'line[CURRENT]=()' assignment fatally exits the subshell before
-                                # _files is ever called. Emitting FILE: inside _arguments ensures
-                                # it is captured even when the caller exits early.
-                                [[ $_head == '*' || $_head == '**' ]] && print -- "FILE:"
-                            fi
-                            ;;
-                    esac
-                fi
-            done
-            # Non-zero return prevents "... && return" guards from short-circuiting.
-            # Populate $line and update $words to the remaining positional words,
-            # as real _arguments -C does, so callers can dispatch subcommand
-            # handlers via e.g. _git-${line[1]} or words[1].
-            if (( _has_C )); then
-                line=("${(@)words[2,-1]}")
-                words=("${(@)words[2,-1]}")
-                (( CURRENT-- ))
-                print -r -- "DEBUG: _arguments updated words to $words, CURRENT to $CURRENT, line to $line" >&2
-            fi
-            (( _has_C && ${#state} > 0 )) && return 1
-            return 0
-        }
-
-        _files()        { print -- "FILE:"; }
-        _path_files()   { print -- "FILE:"; }
-        _directories()  { print -- "FILE:"; }
-        _globbed_files(){ print -- "FILE:"; }
-        _pick_variant() { return 0; }
-        _wanted()       { shift 2; "$@" 2>/dev/null; }
-        _call_function(){ "$@" 2>/dev/null; }
-        _tags()         { return 0; }
-        _requested()    { return 0; }
-        _next_label()   { return 1; }
-        _prefix()       { return 0; }
-        _suffix()       { return 0; }
-        _multi_parts()  { return 0; }
-        _values()       { return 0; }
-        compset()       { return 0; }
-        _regex_arguments(){ return 0; }
-        _regex_words()  { return 0; }
-
-        # _describe [-t tag] description array [array ...]
-        # Each element of the named array is 'value:description' or just 'value'.
-        _describe() {
-            local skip=0 a
-            for a in "$@"; do
-                (( skip )) && { skip=0; continue; }
-                case $a in
-                    # Options that consume next arg
-                    -t|-J|-V) skip=1; continue ;;
-                    # Boolean flags
-                    -[12oOnrxX]) continue ;;
-                esac
-                # Try to expand as an array variable; description strings won't match.
-                local -a _da=("${(@P)a}")
-                local item
-                for item in "${_da[@]}"; do
-                    [[ -n $item ]] && print -r -- "ITEM:${item%%:*}"
-                done
-            done
-        }
-
-        _alternative() {
-            local spec action list v
-            for spec in "$@"; do
-                action="${spec##*:}"
-                case $action in
-                    \(*\))
-                        list="${action#(}"; list="${list%)}";
-                        for v in ${=list}; do [[ -n $v ]] && print -r -- "ITEM:${v}"; done ;;
-                    _*|__*)
-                        # Action may include arguments (e.g. "_path_files -/"), so split
-                        # into function name + args before checking existence and calling.
-                        local _alt_func="${action%% *}"
-                        (( ${+functions[$_alt_func]} )) && ${=action} 2>/dev/null ;;
-                esac
-            done
-        }
-
-        _call_function() {
-            shift  # skip return-value variable name
-            (( ${+functions[$1]} )) || return 1
-            "$@" 2>/dev/null
-        }
-
-        _retrieve_cache() { return 1; }
-        _store_cache()    { return 0; }
-        _cache_invalid()  { return 0; }
-
-        # ALARM/TRAPALRM: interrupt the completion function if it takes too long.
-        # This avoids spawning extra background processes for timeout management.
-        TRAPALRM() { return 1; }
-        ALARM=1
-
-        # For subcommand nodes (depth ≥ 2) use "--" as the current word so that
-        # bash-style completion functions (which check 'case $cur in --*)')  emit
-        # their flag lists rather than positional completions.
-        local _hv_cur=""
-        (( ${#cmd_words} > 1 )) && _hv_cur="--"
-        local -a words=("${cmd_words[@]}" "$_hv_cur")
-        local CURRENT=$(( ${#cmd_words} + 1 ))
-        local PREFIX='' SUFFIX='' IPREFIX='' ISUFFIX=''
-        local curcontext=":complete:${top}:"
-        local service="$top"
-        local state state_descr
-        local -a line
-        local -A opt_args
-
-        "$comp_func"
-        print -r -- "DEBUG: AFTER $comp_func: functions[_git_commit] = ${+functions[_git_commit]}" >&2
-        ALARM=0
-    )
+# Send a setup chunk and sync on a unique sentinel before continuing.
+# macOS PTY input buffers cap around 1KB; writes that overflow are silently
+# dropped under non-blocking mode (-b above), so the worker would never
+# reach the rest of the setup. Sending in sub-1KB chunks with intermediate
+# reads keeps the pipeline drained and guarantees full delivery.
+typeset -gi _HV_SYNC=0
+_hv_send_sync() {
+    local payload=$1
+    (( _HV_SYNC++ ))
+    local mark="__HV_SYNC_${_HV_SYNC}__"
+    zpty -w _hv "${payload}; builtin print ${mark}"
+    local _drain=""
+    zpty -r _hv _drain "*${mark}*" || return 1
+    return 0
 }
 
-# Harvest the completion node for a given command path.
-# Args: cmd [subcmd [subcmd...]]
+_hv_send_sync "PROMPT='' RPROMPT='' PS2='' SPROMPT=''" || exit 1
+_hv_send_sync "unsetopt BEEP LIST_BEEP CORRECT CORRECT_ALL AUTO_LIST AUTO_MENU MENU_COMPLETE LIST_AMBIGUOUS PROMPT_CR PROMPT_SP" || exit 1
+# Strip bracketed-paste bindings so a fast TAB-after-space isn't interpreted
+# as a paste-block start. ZLE itself stays enabled — TAB needs it to fire
+# the completion widget.
+_hv_send_sync "bindkey -r '^[[200~' 2>/dev/null; bindkey -r '^[[201~' 2>/dev/null" || exit 1
+_hv_send_sync "zstyle ':completion:*' menu no; zstyle ':completion:*' list-prompt ''; zstyle ':completion:*' select-prompt ''; zstyle ':completion:*' insert-tab false" || exit 1
+_hv_send_sync "autoload -Uz compinit && compinit -d ${(qqq)COMPDUMP} -u 2>/dev/null" || exit 1
+
+# compadd shim: intercepts all completion calls.
+# - Tracks -f/-F flag → emits <<HV_FILE>> (avoids capturing filesystem listings).
+# - Tracks -a flag → expands array names via dynamic scoping (${(@P)name}).
+#   This handles git's __gitcomp pattern: compadd -a -- array, where `array`
+#   is a local var in __gitcomp visible here via zsh's dynamic scoping.
+# - Handles `-` or `--` as the option/items separator. _arguments and similar
+#   completers actually use single `-` (e.g. `compadd -J grp -D arr - -E -F`),
+#   so we MUST accept it — but we also have to skip the *values* of one-arg
+#   flags like -J/-D/-M/etc., otherwise a value that happens to be "-" or
+#   "--" terminates option parsing one step too early.
+# - Outputs <<HV_CA:-- items...>> for non-file completions.
+_hv_send_sync 'compadd() { local _hv_f=0 _hv_a=0 _hv_past=0 _hv_skip=0 _hv_i _hv_arg; local -a _hv_items _hv_args=("$@"); for (( _hv_i = 1; _hv_i <= ${#_hv_args}; _hv_i++ )); do _hv_arg=${_hv_args[_hv_i]}; if (( _hv_past )); then if (( _hv_a )); then _hv_items+=("${(@P)_hv_arg}"); else [[ -n $_hv_arg ]] && _hv_items+=("$_hv_arg"); fi; continue; fi; if (( _hv_skip )); then _hv_skip=0; continue; fi; case $_hv_arg in (--|-) _hv_past=1 ;; (-[fF]) _hv_f=1 ;; (-a) _hv_a=1 ;; (-[PSpsiIWdJVXxrRDFAEMOtykn]) _hv_skip=1 ;; esac; done; (( _hv_f )) && builtin print -- "<<HV_FILE>>" || builtin print -r -- "<<HV_CA:-- ${_hv_items[*]}>>"; }' || exit 1
+
+_hv_send_sync '_files() { builtin print -- "<<HV_FILE>>"; return 0 }; _path_files() { builtin print -- "<<HV_FILE>>"; return 0 }; _directories() { builtin print -- "<<HV_FILE>>"; return 0 }; _globbed_files() { builtin print -- "<<HV_FILE>>"; return 0 }' || exit 1
+
+_hv_send_sync '_file_absolute() { builtin print -- "<<HV_FILE>>"; return 0 }; _absolute_path() { builtin print -- "<<HV_FILE>>"; return 0 }; _message() { return 0 }; _users() { return 0 }; _hosts() { return 0 }; _groups() { return 0 }; _pids() { return 0 }; _process_names() { return 0 }' || exit 1
+
+# ---- probe one command path -----------------------------------------------
+# Sends "<words> <TAB><Ctrl-U>print __HV_MARK_<n>__\n" and reads back until
+# the mark appears. zsh's zpty -r caps its read at 1MB so this is bounded
+# even when a slow completer (e.g. _man enumerating every command on PATH)
+# never emits the mark; the parser-side size guard then drops the noise.
+typeset -g _HV_RAW=""
+typeset -g _HV_MARK=0
+
+_hv_probe() {
+    local buf=$1
+    (( _HV_MARK++ ))
+    local mark="__HV_MARK_${_HV_MARK}__"
+    zpty -w -n _hv "$buf"$'\t'
+    sleep 0.08
+    zpty -w -n _hv $'\x15'
+    zpty -w _hv "print $mark"
+    _HV_RAW=""
+    # Blocking read; zsh's zpty -r caps at 1MB so this can never read forever
+    # even when a completer (e.g. _man) emits hundreds of KB and the mark gets
+    # buried. The parser-side payload guard in _hv_parse_ca then skips any
+    # capture larger than 8KB, so we don't recurse on noisy enumerations.
+    zpty -r _hv _HV_RAW "*${mark}*" 2>/dev/null
+}
+
+# ---- parse one compadd capture ---------------------------------------------
+# Decode "<<HV_CA:-- items...>>" into items appended to the named arrays.
+# The shim normalises all compadd output to this format: everything after
+# the -- separator is either a flag (starts with -) or a subcommand.
+# Args: ca_args_string flags_array_name subs_array_name
+#
+# Bails out on huge payloads (man-style "every command on PATH" dumps run to
+# hundreds of KB and recursing into each "subcommand" is catastrophic).
+# A normal subcommand/flag list is well under 4KB.
+_hv_parse_ca() {
+    local args_str=$1 flagsvar=$2 subsvar=$3
+    (( ${#args_str} > 8192 )) && return
+    local -a parts=("${(@z)args_str}")
+    local past=0 v
+    # Per-call item budget — prevents pathological completers from filling
+    # the parent's arrays beyond what MAX_ITEMS_PER_NODE will keep anyway.
+    local -i added=0 cap=$(( MAX_ITEMS_PER_NODE + 50 ))
+    for v in "${parts[@]}"; do
+        (( added >= cap )) && return
+        if (( past )); then
+            [[ -z $v ]] && continue
+            # __gitcomp emits this placeholder; not a real flag.
+            [[ $v == '--no-...'* ]] && continue
+            # Strip trailing space that __gitcomp appends to each flag.
+            v=${v% }
+            [[ -z $v ]] && continue
+            if [[ $v == -* ]]; then
+                eval "$flagsvar+=(\"\$v\")"
+            else
+                eval "$subsvar+=(\"\$v\")"
+            fi
+            (( added++ ))
+        elif [[ $v == -- || $v == - ]]; then
+            past=1
+        fi
+    done
+}
+
+# ---- harvest one node ------------------------------------------------------
 _hv_node() {
-    print -r -- "DEBUG: _hv_node called with $@" >&2
     local -a cmd_words=("$@")
     local depth=${#cmd_words}
     (( depth > 3 )) && return
+    (( SECONDS >= _HV_DEADLINE )) && return
 
     local key="${(j:>:)cmd_words}"
     [[ -n ${_HV_SEEN[$key]} ]] && return
     _HV_SEEN[$key]=1
 
-    local top="${cmd_words[1]}"
-    local comp_func="${_comps[$top]:-_${top}}"
-
-    if (( ! ${+functions[$comp_func]} )); then
-        autoload -U "$comp_func" 2>/dev/null || return
-        (( ${+functions[$comp_func]} )) || return
+    local joined="${(j: :)cmd_words}"
+    local -a flags subs
+    local wants=0 line probe count payload
+    # Two primary probes: trailing space (subcommands / files) and trailing
+    # single-dash (covers _arguments-style completers like _grep, _ls — they
+    # emit BOTH short and long flags on `-`).
+    for probe in "$joined " "$joined -"; do
+        _hv_probe "$probe"
+        count=0
+        while IFS= read -r line; do
+            line=${line%$'\r'}
+            case $line in
+                *'<<HV_FILE>>'*) [[ $probe == *' ' ]] && wants=1 ;;
+                *'<<HV_CA:'*'>>'*)
+                    payload=${line#*<<HV_CA:}
+                    payload=${payload%%>>*}
+                    _hv_parse_ca "$payload" flags subs wants
+                    (( count++ ))
+                    (( count > 64 )) && break
+                    ;;
+            esac
+        done <<< "$_HV_RAW"
+    done
+    # Fallback: commands like grep whose first positional is a non-file slot
+    # (e.g. `_guard "^-*" pattern`) won't dispatch to _files on the trailing-
+    # space probe. Advance one positional with a placeholder to surface the
+    # file-accepting slot. Only at depth 1, and only when we already have flags
+    # but no subcommands and no file marker — otherwise we'd risk treating the
+    # placeholder as a subcommand for git-style dispatchers.
+    if (( depth == 1 && ! wants && ${#flags} > 0 && ${#subs} == 0 )); then
+        _hv_probe "$joined x "
+        while IFS= read -r line; do
+            line=${line%$'\r'}
+            [[ $line == *'<<HV_FILE>>'* ]] && { wants=1; break; }
+        done <<< "$_HV_RAW"
     fi
 
-    local raw
-    raw=$(_hv_run_func "$comp_func" "${cmd_words[@]}")
+    # Fallback: bash-completion-derived completers (homebrew's _git) only emit
+    # long flags via __gitcomp_builtin when current word matches `--*`; a `-`
+    # probe falls through to file completion. If we got no flags from `-`, try
+    # `--` to recover. Adds zero probes for well-behaved _arguments completers
+    # (the common case) since they already returned flags for `-`.
+    if (( ${#flags} == 0 )); then
+        _hv_probe "$joined --"
+        count=0
+        while IFS= read -r line; do
+            line=${line%$'\r'}
+            case $line in
+                *'<<HV_CA:'*'>>'*)
+                    payload=${line#*<<HV_CA:}
+                    payload=${payload%%>>*}
+                    _hv_parse_ca "$payload" flags subs wants
+                    (( count++ ))
+                    (( count > 64 )) && break
+                    ;;
+            esac
+        done <<< "$_HV_RAW"
+    fi
 
-    local -a flags subs
-    local wants=0 line
-    while IFS= read -r line; do
-        case $line in
-            FILE:) wants=1 ;;
-            FLAG:*)
-                local v=${line#FLAG:}
-                [[ -n $v ]] && flags+=("$v")
-                ;;
-            ITEM:*)
-                local v=${${line#ITEM:}%% #}
-                [[ -z $v ]] && continue
-                # Skip the '--no-...' pseudo-option emitted by __gitcomp as a placeholder.
-                [[ $v == '--no-...'* ]] && continue
-                if [[ $v == -* ]]; then
-                    flags+=("$v")
-                else
-                    subs+=("$v")
-                fi
-                ;;
-        esac
-    done <<< "$raw"
+    # Cap each list to avoid pathological output.
+    if (( ${#flags} > MAX_ITEMS_PER_NODE )); then
+        flags=("${flags[@]:0:$MAX_ITEMS_PER_NODE}")
+    fi
+    if (( ${#subs} > MAX_ITEMS_PER_NODE )); then
+        subs=("${subs[@]:0:$MAX_ITEMS_PER_NODE}")
+    fi
 
-    local path_json="["
-    local first=1
-    local w
+    if (( ! wants && ${#flags} == 0 && ${#subs} == 0 )); then
+        return
+    fi
+
+    local path_json="[" first=1 w
     for w in "${cmd_words[@]}"; do
         (( first )) || path_json+=","
         first=0
         path_json+="\"$(_hv_json_escape "$w")\""
     done
     path_json+="]"
-
-    # If the completion function produced no flags, no subcommands, and no file
-    # indicator, the harvest found nothing useful. Skip emitting a node so the
-    # daemon falls back to file completions for unknown commands.
-    if (( ! wants && ${#flags} == 0 && ${#subs} == 0 )); then
-        return
-    fi
 
     local wants_str=false
     (( wants )) && wants_str=true
@@ -340,21 +271,23 @@ _hv_node() {
         local sub
         for sub in "${unique_subs[@]}"; do
             [[ -z $sub ]] && continue
+            [[ $sub == -* ]] && continue
+            # Skip recursion into things that obviously aren't subcommands:
+            # git refs (HEAD, ORIG_HEAD, refs/foo, origin/main, @{u}), paths,
+            # all-uppercase tokens. These come back when the parent completer
+            # offers branch/file values rather than literal subcommand words.
+            # Recursing into them produces another branch listing and burns
+            # the wall-clock budget on useless work.
+            case $sub in
+                HEAD|ORIG_HEAD|FETCH_HEAD|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD) continue ;;
+                */*|*@*|*~*|*\^*) continue ;;
+                [A-Z_][A-Z_]##) continue ;;
+            esac
             _hv_node "${cmd_words[@]}" "$sub"
         done
     fi
 }
 
-if [[ -n ${1:-} ]]; then
-    # JIT mode: harvest a single command passed as $1.
-    local cmd=$1
-    [[ $cmd == -* ]] || [[ $cmd == *[\ \(\)\[\]\{\}]* ]] || _hv_node "$cmd"
-else
-    local cmd
-    for cmd in ${(k)_comps}; do
-        [[ -z $cmd ]] && continue
-        [[ $cmd == -* ]] && continue
-        [[ $cmd == *[\ \(\)\[\]\{\}]* ]] && continue
-        _hv_node "$cmd"
-    done
-fi
+_hv_node "$TARGET"
+
+zpty -d _hv 2>/dev/null
