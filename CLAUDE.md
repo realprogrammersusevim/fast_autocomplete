@@ -39,6 +39,49 @@ printf 'BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=test\n\n' "$PWD" \
 
 The response is a single JSON line: `{"completions":[...],"unchanged":false}`. Pipe through `jq` to pretty-print. Change `BUFFER`/`CURSOR` to test different inputs; `CURSOR` must equal the byte offset of the cursor in `BUFFER`.
 
+### More socket examples
+
+```sh
+# 1. Subcommand completion (git s→status, show, …)
+printf 'BUFFER=git s\nCURSOR=6\nCWD=%s\nSESSION=test\n\n' "$PWD" \
+  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+
+# 2. Flag completion (only shown when current_word starts with `-`)
+printf 'BUFFER=git --ver\nCURSOR=12\nCWD=%s\nSESSION=test\n\n' "$PWD" \
+  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+
+# 3. File completion with partial path
+printf 'BUFFER=ls src/\nCURSOR=7\nCWD=%s\nSESSION=test\n\n' "$PWD" \
+  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+
+# 4. Record a frecency hit directly (returns {"unchanged":true})
+printf 'BUFFER=\nCURSOR=0\nCWD=%s\nSESSION=test\nRECORD=git status\n\n' "$PWD" \
+  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+
+# 5. Two different sessions should each get unchanged:false on first identical request
+for s in sessA sessB; do
+  printf "BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=$s\n\n" "$PWD" \
+    | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .unchanged
+done
+```
+
+### Using the Rust client for manual testing
+
+The binary also exposes client subcommands that do the socket I/O for you:
+
+```sh
+# --complete   (raw completions, one per line)
+fast_autocomplete --complete 5 'git ' "$PWD"
+
+# --display <cols>  (columnar, screen-formatted)
+fast_autocomplete --display "$(tput cols)" 5 'git ' "$PWD"
+
+# --record <value>  (fire-and-forget frecency update)
+fast_autocomplete --record "git status"
+```
+
+These are the same commands the zsh plugin invokes internally.
+
 ## Architecture
 
 ```
@@ -59,7 +102,7 @@ socket.rs          — accept loop; per-connection handler; JIT harvest trigger
     ├─ parser.rs   — splits BUFFER at CURSOR into (lookup_words, current_word)
     ├─ cache.rs    — CompletionTree: trie of CompletionNode {flags, subcommands, wants_files, children}
     ├─ files.rs    — filesystem listing with ~ and relative-path expansion
-    ├─ frecency.rs — in-memory frequency×recency scorer (in-process only, not persisted)
+    ├─ frecency.rs — frequency×recency scorer; persisted to disk via bincode (debounced saves + final flush on shutdown)
     ├─ ranking.rs  — merge static + file items → fuzzy-filter (skim scorer) → dedup → sort by frecency+fuzzy/type/alpha → cap 200; flags only shown when typing `-`
     └─ session.rs  — per-session hash dedup (sends `unchanged:true` if list hasn't changed)
 
@@ -77,6 +120,7 @@ harvester.rs       — two entry points:
 - `harvest_channels: DashMap<String, Arc<watch::Sender<bool>>>` — one channel per command; signals completion
 - `harvested: DashMap<String, ()>` — set of commands whose harvest has finished
 - `sessions: DashMap<u64, SessionState>`, `frecency: Mutex<FrecencyStore>`
+- `frecency_dirty: Notify` — kicked on each frecency mutation; a background task debounces and persists to disk every 5 s
 
 **JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_channels`.
 
@@ -89,7 +133,7 @@ harvester.rs       — two entry points:
 **Key design constraints:**
 - Harvests are lazy and per-command — the daemon is immediately usable (file-only fallback) before any harvest runs.
 - Each connection handles exactly one request then closes.
-- Frecency is in-memory only; it resets when the daemon restarts.
+- Frecency is persisted to disk at `$XDG_DATA_HOME/fast_autocomplete/frecency.bin` (default `~/.local/share/fast_autocomplete/frecency.bin`); override with `$FAST_AUTOCOMPLETE_FRECENCY_PATH`. Saves are debounced (5 s after last hit) with a final flush on clean shutdown. The format is bincode; a corrupt or missing file silently starts fresh.
 - The harvester recurses up to depth 3 (command → subcommand → sub-subcommand) to avoid combinatorial explosion.
 - Single-instance enforcement via `flock` on a `.lock` file (same base path as the socket with `.lock` extension). A non-blocking `LOCK_EX` attempt at startup exits immediately if another daemon holds the lock — eliminates the TOCTOU race of socket-based detection.
 - Any leftover socket from a crashed daemon is removed at startup before binding.
