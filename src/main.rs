@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use dashmap::DashMap;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub struct SharedState {
     pub tree: Arc<cache::CompletionTree>,
@@ -25,6 +25,9 @@ pub struct SharedState {
     pub harvested: DashMap<String, ()>,
     pub sessions: DashMap<u64, session::SessionState>,
     pub frecency: Mutex<frecency::FrecencyStore>,
+    /// Kicked when the frecency store has been mutated; a background task
+    /// debounces these kicks and persists the store to disk.
+    pub frecency_dirty: Notify,
 }
 
 fn socket_path() -> std::path::PathBuf {
@@ -43,6 +46,17 @@ fn lock_path() -> std::path::PathBuf {
     let mut p = socket_path();
     p.set_extension("lock");
     p
+}
+
+fn frecency_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("FAST_AUTOCOMPLETE_FRECENCY_PATH") {
+        return std::path::PathBuf::from(p);
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    base.join("fast_autocomplete").join("frecency.bin")
 }
 
 /// Acquires an exclusive non-blocking flock on the lock file.
@@ -115,14 +129,33 @@ async fn daemon_main() -> anyhow::Result<()> {
     let listener = tokio::net::UnixListener::bind(&path)?;
     log::info!("listening on {}", path.display());
 
+    let frecency_path = frecency_path();
     let state = Arc::new(SharedState {
         tree: Arc::new(cache::CompletionTree::default()),
         cmd_names: OnceLock::new(),
         harvest_channels: DashMap::new(),
         harvested: DashMap::new(),
         sessions: DashMap::new(),
-        frecency: Mutex::new(frecency::FrecencyStore::new()),
+        frecency: Mutex::new(frecency::FrecencyStore::load(&frecency_path)),
+        frecency_dirty: Notify::new(),
     });
+
+    // Debounce task: after each kick, sleep 5s (coalescing further kicks during
+    // that window) then persist the frecency store.
+    {
+        let state = Arc::clone(&state);
+        let path = frecency_path.clone();
+        tokio::spawn(async move {
+            loop {
+                state.frecency_dirty.notified().await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let snapshot = state.frecency.lock().await;
+                if let Err(e) = snapshot.save(&path) {
+                    log::warn!("frecency: save to {} failed: {e}", path.display());
+                }
+            }
+        });
+    }
 
     // Populate command name list quickly at startup (no completion functions run).
     {
@@ -160,6 +193,15 @@ async fn daemon_main() -> anyhow::Result<()> {
     }
 
     let _ = std::fs::remove_file(&path);
+
+    // Final flush: persist any pending frecency updates before exit.
+    {
+        let frecency = state.frecency.lock().await;
+        if let Err(e) = frecency.save(&frecency_path) {
+            log::warn!("frecency: final save to {} failed: {e}", frecency_path.display());
+        }
+    }
+
     log::info!("shutdown complete");
     Ok(())
 }

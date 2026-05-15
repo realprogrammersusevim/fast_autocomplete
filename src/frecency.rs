@@ -1,20 +1,23 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
 pub struct FrecencyEntry {
     count: u32,
-    last_used: Instant,
+    last_used: SystemTime,
 }
 
+#[derive(Default, Serialize, Deserialize)]
 pub struct FrecencyStore {
     entries: HashMap<String, FrecencyEntry>,
 }
 
 impl FrecencyStore {
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn record(&mut self, completion: &str) {
@@ -23,17 +26,19 @@ impl FrecencyStore {
             .entry(completion.to_string())
             .or_insert_with(|| FrecencyEntry {
                 count: 0,
-                last_used: Instant::now(),
+                last_used: SystemTime::now(),
             });
         entry.count += 1;
-        entry.last_used = Instant::now();
+        entry.last_used = SystemTime::now();
     }
 
     pub fn score(&self, completion: &str) -> f64 {
         let Some(entry) = self.entries.get(completion) else {
             return 0.0;
         };
-        let age = entry.last_used.elapsed();
+        let age = SystemTime::now()
+            .duration_since(entry.last_used)
+            .unwrap_or_default();
         let weight = if age < Duration::from_secs(3_600) {
             1.0
         } else if age < Duration::from_secs(86_400) {
@@ -46,13 +51,37 @@ impl FrecencyStore {
         f64::from(entry.count) * weight
     }
 
+    /// Load from disk. Returns an empty store if the file does not exist or is
+    /// unreadable / corrupt — the on-disk format is best-effort, not load-bearing.
+    pub fn load(path: &Path) -> Self {
+        let Ok(bytes) = std::fs::read(path) else {
+            return Self::new();
+        };
+        bincode::deserialize(&bytes).unwrap_or_else(|e| {
+            log::warn!("frecency: failed to decode {}: {e}", path.display());
+            Self::new()
+        })
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = bincode::serialize(self)?;
+        // Atomic-ish: write to temp and rename so a crash mid-write doesn't truncate the file.
+        let tmp = path.with_extension("bin.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn insert_entry(&mut self, completion: &str, count: u32, age: std::time::Duration) {
         self.entries.insert(
             completion.to_string(),
             FrecencyEntry {
                 count,
-                last_used: std::time::Instant::now().checked_sub(age).unwrap(),
+                last_used: SystemTime::now().checked_sub(age).unwrap(),
             },
         );
     }
@@ -131,5 +160,26 @@ mod tests {
         let mut store = FrecencyStore::new();
         store.insert_entry("x", 1, Duration::from_secs(1_209_600));
         assert_eq!(store.score("x"), 0.4);
+    }
+
+    #[test]
+    fn test_roundtrip_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frecency.bin");
+        let mut store = FrecencyStore::new();
+        store.record("git");
+        store.record("git");
+        store.record("cargo");
+        store.save(&path).unwrap();
+        let loaded = FrecencyStore::load(&path);
+        assert!(loaded.score("git") > loaded.score("cargo"));
+        assert!(loaded.score("cargo") > 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_load_missing_file_returns_empty() {
+        let store = FrecencyStore::load(Path::new("/nonexistent/path/frecency.bin"));
+        assert_eq!(store.score("anything"), 0.0);
     }
 }

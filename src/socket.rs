@@ -62,6 +62,7 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
 
     if let Some(value) = req.record {
         state.frecency.lock().await.record(&value);
+        state.frecency_dirty.notify_one();
         return Response::unchanged();
     }
 
@@ -142,6 +143,7 @@ mod tests {
             harvested: DashMap::new(),
             sessions: DashMap::new(),
             frecency: tokio::sync::Mutex::new(crate::frecency::FrecencyStore::new()),
+            frecency_dirty: tokio::sync::Notify::new(),
         })
     }
 
