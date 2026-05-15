@@ -1,8 +1,18 @@
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
-#[derive(Default)]
 pub struct SessionState {
     last_hash: u64,
+    pub last_seen: Instant,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            last_hash: 0,
+            last_seen: Instant::now(),
+        }
+    }
 }
 
 impl SessionState {

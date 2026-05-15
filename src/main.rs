@@ -157,6 +157,23 @@ async fn daemon_main() -> anyhow::Result<()> {
         });
     }
 
+    // Periodically evict session entries that haven't been seen in a while.
+    // Shells come and go; without this the sessions map grows monotonically.
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+            const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+            loop {
+                tokio::time::sleep(SWEEP_INTERVAL).await;
+                let now = std::time::Instant::now();
+                state
+                    .sessions
+                    .retain(|_, s| now.duration_since(s.last_seen) < SESSION_TTL);
+            }
+        });
+    }
+
     // Populate command name list quickly at startup (no completion functions run).
     {
         let state = Arc::clone(&state);

@@ -52,8 +52,10 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
         if let Err(e) = harvester::harvest_command(&cmd_owned, &state_clone.tree) {
             log::warn!("harvest_command('{cmd_owned}') failed: {e}");
         }
-        state_clone.harvested.insert(cmd_owned, ());
+        state_clone.harvested.insert(cmd_owned.clone(), ());
         let _ = tx.send(true);
+        // Free the dedup channel; `harvested` is enough to gate future requests.
+        state_clone.harvest_channels.remove(&cmd_owned);
     });
 }
 
@@ -126,6 +128,7 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     );
 
     let mut session = state.sessions.entry(req.session).or_default();
+    session.last_seen = std::time::Instant::now();
 
     if session.is_duplicate(&completions) {
         Response::unchanged()
