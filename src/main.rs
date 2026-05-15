@@ -149,7 +149,7 @@ async fn daemon_main() -> anyhow::Result<()> {
             loop {
                 state.frecency_dirty.notified().await;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let snapshot = state.frecency.lock().await;
+                let mut snapshot = state.frecency.lock().await;
                 if let Err(e) = snapshot.save(&path) {
                     log::warn!("frecency: save to {} failed: {e}", path.display());
                 }
@@ -196,7 +196,7 @@ async fn daemon_main() -> anyhow::Result<()> {
 
     // Final flush: persist any pending frecency updates before exit.
     {
-        let frecency = state.frecency.lock().await;
+        let mut frecency = state.frecency.lock().await;
         if let Err(e) = frecency.save(&frecency_path) {
             log::warn!("frecency: final save to {} failed: {e}", frecency_path.display());
         }
