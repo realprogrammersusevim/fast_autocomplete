@@ -143,12 +143,11 @@ _fast_autocomplete() {
       ;;
   esac
 
-  compadd -V fast_autocomplete -Q -U -- "${completions[@]}"
   if [[ $_FA_REVERSE_COMPLETE == 1 ]]; then
-    compstate[insert]='menu:-1'
-  else
-    compstate[insert]='menu:1'
+    completions=( "${(Oa)completions[@]}" )
   fi
+  compadd -V fast_autocomplete -Q -U -- "${completions[@]}"
+  compstate[insert]='menu:1'
 }
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +236,16 @@ _fa_reverse_complete_widget() {
   _FA_REVERSE_COMPLETE=0
 }
 zle -N _fa_reverse_complete_widget
-bindkey '^[[Z' _fa_reverse_complete_widget
+
+# Re-apply the binding on every prompt. Other plugins (zsh-autosuggestions,
+# oh-my-zsh, etc.) often rebind ^[[Z after we source, so a one-shot bindkey at
+# load time gets clobbered.
+_fa_bind_shift_tab() {
+  bindkey '^[[Z' _fa_reverse_complete_widget
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _fa_bind_shift_tab
+_fa_bind_shift_tab
 
 # --------------------------------------------------------------------------- #
 #  Plugin setup                                                                 #
