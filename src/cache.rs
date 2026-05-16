@@ -94,7 +94,13 @@ mod tests {
     use std::sync::Arc;
 
     fn arc_strs(items: &[&str]) -> Arc<[String]> {
-        Arc::from(items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>().into_boxed_slice())
+        Arc::from(
+            items
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
     }
 
     #[test]

@@ -129,10 +129,7 @@ mod tests {
         let mut store = FrecencyStore::new();
         store.record("git");
         let s = store.score("git");
-        assert!(
-            (0.99..=1.01).contains(&s),
-            "expected score ≈ 1.0, got {s}"
-        );
+        assert!((0.99..=1.01).contains(&s), "expected score ≈ 1.0, got {s}");
     }
 
     #[test]

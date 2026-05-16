@@ -125,7 +125,11 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     } else if flags_slice.is_empty() {
         subs_slice
     } else {
-        static_buf = flags_slice.iter().chain(subs_slice.iter()).cloned().collect();
+        static_buf = flags_slice
+            .iter()
+            .chain(subs_slice.iter())
+            .cloned()
+            .collect();
         &static_buf
     };
 
@@ -133,12 +137,10 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     // HashMap upfront. Read locks don't block other readers, and `record`
     // writes are rare (only on tab acceptance).
     let frecency = state.frecency.read().await;
-    let completions = ranking::rank_completions(
-        static_slice,
-        &file_items,
-        &parsed.current_word,
-        |s| frecency.score(s),
-    );
+    let completions =
+        ranking::rank_completions(static_slice, &file_items, &parsed.current_word, |s| {
+            frecency.score(s)
+        });
     drop(frecency);
 
     let mut session = state.sessions.entry(req.session).or_default();
@@ -288,9 +290,9 @@ mod tests {
         let state = make_state();
         state.tree.insert(
             &["mycmd".to_string()],
-            vec![],  // no flags
-            vec![],  // no subcommands
-            false,   // wants_files explicitly false in tree
+            vec![], // no flags
+            vec![], // no subcommands
+            false,  // wants_files explicitly false in tree
         );
         state.harvested.insert("mycmd".to_string(), ());
         let tmpdir = tempfile::TempDir::new().unwrap();

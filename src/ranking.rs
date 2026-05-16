@@ -58,7 +58,11 @@ pub fn rank_completions(
             .then(a.2.cmp(b.2))
     });
 
-    scored.into_iter().take(200).map(|(_, _, s)| s.to_string()).collect()
+    scored
+        .into_iter()
+        .take(200)
+        .map(|(_, _, s)| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -102,12 +106,9 @@ mod tests {
 
     #[test]
     fn test_frecency_dominates_fuzzy() {
-        let result = rank_completions(
-            &strs(&["apple", "apricot"]),
-            &[],
-            "ap",
-            |s| if s == "apricot" { 100.0 } else { 0.0 },
-        );
+        let result = rank_completions(&strs(&["apple", "apricot"]), &[], "ap", |s| {
+            if s == "apricot" { 100.0 } else { 0.0 }
+        });
         assert!(!result.is_empty());
         assert_eq!(result[0], "apricot");
     }
@@ -128,12 +129,7 @@ mod tests {
     #[test]
     fn test_fuzzy_filter_drops_non_matches() {
         // "xyzzy" contains 'x' which is absent from all candidates
-        let result = rank_completions(
-            &strs(&["add", "commit", "checkout"]),
-            &[],
-            "xyzzy",
-            zero,
-        );
+        let result = rank_completions(&strs(&["add", "commit", "checkout"]), &[], "xyzzy", zero);
         assert!(result.is_empty());
     }
 

@@ -23,7 +23,10 @@ impl Request {
             cursor: map.get("CURSOR").and_then(|s| s.parse().ok()).unwrap_or(0),
             cwd: map.get("CWD").copied().unwrap_or(".").to_string(),
             session: map.get("SESSION").and_then(|s| s.parse().ok()).unwrap_or(0),
-            record: map.get("RECORD").filter(|s| !s.is_empty()).map(ToString::to_string),
+            record: map
+                .get("RECORD")
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string),
         }
     }
 }
