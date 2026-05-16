@@ -117,12 +117,12 @@ harvester.rs       — two entry points:
 **SharedState** (defined in `main.rs`):
 - `tree: Arc<CompletionTree>` — shared trie, populated incrementally as commands are harvested
 - `cmd_names: OnceLock<Vec<String>>` — all known command names (zsh completion table + `ZSH_BUILTINS` constant), populated quickly at startup
-- `harvest_channels: DashMap<String, Arc<watch::Sender<bool>>>` — one channel per command; signals completion
+- `harvest_in_flight: DashSet<String>` — commands whose harvest is currently running; dedups concurrent JIT triggers
 - `harvested: DashMap<String, ()>` — set of commands whose harvest has finished
-- `sessions: DashMap<u64, SessionState>`, `frecency: Mutex<FrecencyStore>`
+- `sessions: DashMap<u64, SessionState>`, `frecency: RwLock<FrecencyStore>`
 - `frecency_dirty: Notify` — kicked on each frecency mutation; a background task debounces and persists to disk every 5 s
 
-**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_channels`.
+**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_in_flight`.
 
 **Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`. Optional `RECORD=<value>` skips completion and records a frecency hit instead — daemon returns `{"unchanged":true}`. Response: single JSON line `{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
 
