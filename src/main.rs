@@ -36,12 +36,19 @@ fn socket_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("FAST_AUTOCOMPLETE_SOCKET") {
         return std::path::PathBuf::from(p);
     }
-    let tmpdir = std::env::var("TMPDIR").map_or_else(
-        |_| std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from,
-    );
+    // Use a stable, user-scoped directory so the lock/socket paths don't
+    // depend on $TMPDIR (which varies across launch contexts and would
+    // otherwise allow multiple daemons to start, each holding a flock on
+    // a different file).
     let uid = unsafe { libc::getuid() };
-    tmpdir.join(format!("fast_autocomplete_{uid}.sock"))
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".cache/fast_autocomplete"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    dir.join(format!("fast_autocomplete_{uid}.sock"))
 }
 
 fn lock_path() -> std::path::PathBuf {
@@ -68,11 +75,15 @@ fn frecency_path() -> std::path::PathBuf {
 /// Returns None if another process already holds the lock.
 fn try_acquire_lock() -> anyhow::Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd;
+    let path = lock_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(lock_path())?;
+        .open(&path)?;
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if ret == 0 {
         Ok(Some(file))

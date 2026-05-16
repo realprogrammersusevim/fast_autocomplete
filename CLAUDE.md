@@ -1,10 +1,14 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
 
 ## What this is
 
-`fast_autocomplete` is a Rust daemon that provides low-latency shell tab-completion over a Unix domain socket. A long-running daemon harvests zsh's completion tree once at startup, then answers completion requests from zsh (or any client) without spawning subprocesses per-keystroke.
+`fast_autocomplete` is a Rust daemon that provides low-latency shell
+tab-completion over a Unix domain socket. A long-running daemon harvests zsh's
+completion tree once at startup, then answers completion requests from zsh (or
+any client) without spawning subprocesses per-keystroke.
 
 ## Build & run
 
@@ -17,11 +21,25 @@ cargo test parser              # run only tests in src/parser.rs (module name fi
 zsh tests/test_harvester.sh    # snapshot tests for scripts/harvester.zsh
 ```
 
-Harvester snapshots live in `tests/harvester_snapshots/`. Run `zsh tests/test_harvester.sh --update` to regenerate them after an intentional change.
+Harvester snapshots live in `tests/harvester_snapshots/`. Run
+`zsh tests/test_harvester.sh --update` to regenerate them after an intentional
+change.
 
-Socket path is `$TMPDIR/fast_autocomplete_<uid>.sock` by default; override with `$FAST_AUTOCOMPLETE_SOCKET`. Enable logging with `RUST_LOG=debug cargo run`.
+Socket path defaults to `$XDG_RUNTIME_DIR/fast_autocomplete_<uid>.sock`, falling
+back to `$HOME/.cache/fast_autocomplete/fast_autocomplete_<uid>.sock` when
+`XDG_RUNTIME_DIR` is unset (e.g., on macOS); override with
+`$FAST_AUTOCOMPLETE_SOCKET`. The lock file lives next to the socket with a
+`.lock` extension. The path deliberately does _not_ use `$TMPDIR` — a stable
+user-scoped path is required so the flock-based single-instance guard works
+across launch contexts (interactive shells, launchd, cron, etc.) that see
+different `$TMPDIR` values. Enable logging with `RUST_LOG=debug cargo run`.
 
-To rebuild and hot-swap a running daemon: `scripts/update.sh` (builds release, kills old daemon, starts new one).
+The socket path is exported as `$FA_SOCK` below for brevity; resolve it once
+with:
+`FA_SOCK="${FAST_AUTOCOMPLETE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.cache/fast_autocomplete}/fast_autocomplete_$(id -u).sock}"`.
+
+To rebuild and hot-swap a running daemon: `scripts/update.sh` (builds release,
+kills old daemon, starts new one).
 
 ## Manual socket testing
 
@@ -30,38 +48,40 @@ Send a raw request to the running daemon with `socat` or `nc`:
 ```sh
 # socat (preferred)
 printf 'BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=test\n\n' "$PWD" \
-  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock"
+  | socat - UNIX-CONNECT:"$FA_SOCK"
 
 # nc fallback
 printf 'BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=test\n\n' "$PWD" \
-  | nc -U "$TMPDIR/fast_autocomplete_$(id -u).sock"
+  | nc -U "$FA_SOCK"
 ```
 
-The response is a single JSON line: `{"completions":[...],"unchanged":false}`. Pipe through `jq` to pretty-print. Change `BUFFER`/`CURSOR` to test different inputs; `CURSOR` must equal the byte offset of the cursor in `BUFFER`.
+The response is a single JSON line: `{"completions":[...],"unchanged":false}`.
+Pipe through `jq` to pretty-print. Change `BUFFER`/`CURSOR` to test different
+inputs; `CURSOR` must equal the byte offset of the cursor in `BUFFER`.
 
 ### More socket examples
 
 ```sh
 # 1. Subcommand completion (git s→status, show, …)
 printf 'BUFFER=git s\nCURSOR=6\nCWD=%s\nSESSION=test\n\n' "$PWD" \
-  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+  | socat - UNIX-CONNECT:"$FA_SOCK" | jq .
 
 # 2. Flag completion (only shown when current_word starts with `-`)
 printf 'BUFFER=git --ver\nCURSOR=12\nCWD=%s\nSESSION=test\n\n' "$PWD" \
-  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+  | socat - UNIX-CONNECT:"$FA_SOCK" | jq .
 
 # 3. File completion with partial path
 printf 'BUFFER=ls src/\nCURSOR=7\nCWD=%s\nSESSION=test\n\n' "$PWD" \
-  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+  | socat - UNIX-CONNECT:"$FA_SOCK" | jq .
 
 # 4. Record a frecency hit directly (returns {"unchanged":true})
 printf 'BUFFER=\nCURSOR=0\nCWD=%s\nSESSION=test\nRECORD=git status\n\n' "$PWD" \
-  | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .
+  | socat - UNIX-CONNECT:"$FA_SOCK" | jq .
 
 # 5. Two different sessions should each get unchanged:false on first identical request
 for s in sessA sessB; do
   printf "BUFFER=git \nCURSOR=5\nCWD=%s\nSESSION=$s\n\n" "$PWD" \
-    | socat - UNIX-CONNECT:"$TMPDIR/fast_autocomplete_$(id -u).sock" | jq .unchanged
+    | socat - UNIX-CONNECT:"$FA_SOCK" | jq .unchanged
 done
 ```
 
@@ -115,29 +135,81 @@ harvester.rs       — two entry points:
 ```
 
 **SharedState** (defined in `main.rs`):
-- `tree: Arc<CompletionTree>` — shared trie, populated incrementally as commands are harvested
-- `cmd_names: OnceLock<Vec<String>>` — all known command names (zsh completion table + `ZSH_BUILTINS` constant), populated quickly at startup
-- `harvest_in_flight: DashSet<String>` — commands whose harvest is currently running; dedups concurrent JIT triggers
+
+- `tree: Arc<CompletionTree>` — shared trie, populated incrementally as commands
+  are harvested
+- `cmd_names: OnceLock<Vec<String>>` — all known command names (zsh completion
+  table + `ZSH_BUILTINS` constant), populated quickly at startup
+- `harvest_in_flight: DashSet<String>` — commands whose harvest is currently
+  running; dedups concurrent JIT triggers
 - `harvested: DashMap<String, ()>` — set of commands whose harvest has finished
 - `sessions: DashMap<u64, SessionState>`, `frecency: RwLock<FrecencyStore>`
-- `frecency_dirty: Notify` — kicked on each frecency mutation; a background task debounces and persists to disk every 5 s
+- `frecency_dirty: Notify` — kicked on each frecency mutation; a background task
+  debounces and persists to disk every 5 s
 
-**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a command, a `spawn_blocking` task runs `harvest_command()` and inserts results into the tree; `harvested` is marked when done. The function returns immediately — requests don't wait for the harvest; they get file-only completions until the tree is populated. Concurrent requests for the same command are deduped via `harvest_in_flight`.
+**JIT harvest flow** (`socket.rs::ensure_harvested`): on the first request for a
+command, a `spawn_blocking` task runs `harvest_command()` and inserts results
+into the tree; `harvested` is marked when done. The function returns immediately
+— requests don't wait for the harvest; they get file-only completions until the
+tree is populated. Concurrent requests for the same command are deduped via
+`harvest_in_flight`.
 
-**Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`. Optional `RECORD=<value>` skips completion and records a frecency hit instead — daemon returns `{"unchanged":true}`. Response: single JSON line `{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
+**Request protocol** (`protocol.rs`): newline-delimited `KEY=VALUE` block
+terminated by a blank line. Fields: `BUFFER`, `CURSOR`, `CWD`, `SESSION`.
+Optional `RECORD=<value>` skips completion and records a frecency hit instead —
+daemon returns `{"unchanged":true}`. Response: single JSON line
+`{"completions":[...],"unchanged":false}` or `{"unchanged":true}`.
 
-**Harvester script** (`scripts/harvester.zsh`): run inside a zsh subshell with the target command as `$1`; intercepts `compadd`/`_arguments`/`_describe` to extract flags and subcommands without executing external processes. Emits NDJSON, one object per completion node. The Rust side embeds this script via `include_str!` and writes it to a temp file before executing. The `list_commands()` path uses a separate inline script (`LIST_COMMANDS_SCRIPT` in `harvester.rs`) that is never written to `scripts/`.
+**Harvester script** (`scripts/harvester.zsh`): run inside a zsh subshell with
+the target command as `$1`; intercepts `compadd`/`_arguments`/`_describe` to
+extract flags and subcommands without executing external processes. Emits
+NDJSON, one object per completion node. The Rust side embeds this script via
+`include_str!` and writes it to a temp file before executing. The
+`list_commands()` path uses a separate inline script (`LIST_COMMANDS_SCRIPT` in
+`harvester.rs`) that is never written to `scripts/`.
 
-**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a plugin manager load it). It registers `_fast_autocomplete` as the first completer, auto-launches the daemon if the socket is absent, and falls through to `_complete` + `_files` on failure. All socket I/O is delegated to the binary via subcommands (`fast_autocomplete --complete`, `--display <cols>`, `--record <val>`) — the plugin no longer does raw socket I/O itself. Before querying the daemon, `_fa_alias_expand` resolves simple (no metacharacter) aliases so that aliased commands get proper completions. Also installs `zle-line-pre-redraw` / `zle-line-finish` hooks (`_fa_update_below` / `_fa_clear_below`) that render completions in a columnar display below the prompt via `zle -M` as you type — separate from Tab completion. When the user accepts a completion, the plugin calls `fast_autocomplete --record <value>` to update the frecency store.
+**zsh plugin** (`fast_autocomplete.plugin.zsh`): source this file (or let a
+plugin manager load it). It registers `_fast_autocomplete` as the first
+completer, auto-launches the daemon if the socket is absent, and falls through
+to `_complete` + `_files` on failure. All socket I/O is delegated to the binary
+via subcommands (`fast_autocomplete --complete`, `--display <cols>`,
+`--record <val>`) — the plugin no longer does raw socket I/O itself. Before
+querying the daemon, `_fa_alias_expand` resolves simple (no metacharacter)
+aliases so that aliased commands get proper completions. Also installs
+`zle-line-pre-redraw` / `zle-line-finish` hooks (`_fa_update_below` /
+`_fa_clear_below`) that render completions in a columnar display below the
+prompt via `zle -M` as you type — separate from Tab completion. When the user
+accepts a completion, the plugin calls `fast_autocomplete --record <value>` to
+update the frecency store.
 
 **Key design constraints:**
-- Harvests are lazy and per-command — the daemon is immediately usable (file-only fallback) before any harvest runs.
+
+- Harvests are lazy and per-command — the daemon is immediately usable
+  (file-only fallback) before any harvest runs.
 - Each connection handles exactly one request then closes.
-- Frecency is persisted to disk at `$XDG_DATA_HOME/fast_autocomplete/frecency.bin` (default `~/.local/share/fast_autocomplete/frecency.bin`); override with `$FAST_AUTOCOMPLETE_FRECENCY_PATH`. Saves are debounced (5 s after last hit) with a final flush on clean shutdown. The format is bincode; a corrupt or missing file silently starts fresh.
-- The harvester recurses up to depth 3 (command → subcommand → sub-subcommand) to avoid combinatorial explosion.
-- Single-instance enforcement via `flock` on a `.lock` file (same base path as the socket with `.lock` extension). A non-blocking `LOCK_EX` attempt at startup exits immediately if another daemon holds the lock — eliminates the TOCTOU race of socket-based detection.
-- Any leftover socket from a crashed daemon is removed at startup before binding.
-- `harvest_command()` wraps the child process in a `KillOnDrop` guard (defined inline) so the child is always killed and reaped on every exit path, preventing zombies.
-- Flags (items starting with `-`) are only shown when `current_word` itself starts with `-` — keeps completions uncluttered while typing subcommands or paths.
-- Completions are fuzzy-filtered using the skim algorithm (`fuzzy_matcher` crate): frecency dominates scoring; the fuzzy score breaks ties among zero-frecency items. Items with no fuzzy match are dropped entirely.
-- Alias expansion: the zsh plugin resolves simple aliases (no shell metacharacters) before querying the daemon, so `g status` expands to `git status` and gets proper completions.
+- Frecency is persisted to disk at
+  `$XDG_DATA_HOME/fast_autocomplete/frecency.bin` (default
+  `~/.local/share/fast_autocomplete/frecency.bin`); override with
+  `$FAST_AUTOCOMPLETE_FRECENCY_PATH`. Saves are debounced (5 s after last hit)
+  with a final flush on clean shutdown. The format is bincode; a corrupt or
+  missing file silently starts fresh.
+- The harvester recurses up to depth 3 (command → subcommand → sub-subcommand)
+  to avoid combinatorial explosion.
+- Single-instance enforcement via `flock` on a `.lock` file (same base path as
+  the socket with `.lock` extension). A non-blocking `LOCK_EX` attempt at
+  startup exits immediately if another daemon holds the lock — eliminates the
+  TOCTOU race of socket-based detection.
+- Any leftover socket from a crashed daemon is removed at startup before
+  binding.
+- `harvest_command()` wraps the child process in a `KillOnDrop` guard (defined
+  inline) so the child is always killed and reaped on every exit path,
+  preventing zombies.
+- Flags (items starting with `-`) are only shown when `current_word` itself
+  starts with `-` — keeps completions uncluttered while typing subcommands or
+  paths.
+- Completions are fuzzy-filtered using the skim algorithm (`fuzzy_matcher`
+  crate): frecency dominates scoring; the fuzzy score breaks ties among
+  zero-frecency items. Items with no fuzzy match are dropped entirely.
+- Alias expansion: the zsh plugin resolves simple aliases (no shell
+  metacharacters) before querying the daemon, so `g status` expands to
+  `git status` and gets proper completions.

@@ -23,8 +23,16 @@ _fa_socket_path() {
     return
   fi
   local uid=${UID:-$(id -u)}
-  local tmpdir=${TMPDIR:-/tmp}
-  print -- "${tmpdir%/}/fast_autocomplete_${uid}.sock"
+  # Mirror src/main.rs::socket_path — stable user-scoped dir, not $TMPDIR.
+  local dir
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+    dir=${XDG_RUNTIME_DIR%/}
+  elif [[ -n ${HOME:-} ]]; then
+    dir=${HOME%/}/.cache/fast_autocomplete
+  else
+    dir=/tmp
+  fi
+  print -- "${dir}/fast_autocomplete_${uid}.sock"
 }
 
 _fa_bin_path() {

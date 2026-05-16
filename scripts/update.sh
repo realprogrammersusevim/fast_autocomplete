@@ -2,7 +2,13 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SOCKET="${FAST_AUTOCOMPLETE_SOCKET:-${TMPDIR%/}/fast_autocomplete_$(id -u).sock}"
+if [[ -n ${FAST_AUTOCOMPLETE_SOCKET:-} ]]; then
+    SOCKET="$FAST_AUTOCOMPLETE_SOCKET"
+elif [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+    SOCKET="${XDG_RUNTIME_DIR%/}/fast_autocomplete_$(id -u).sock"
+else
+    SOCKET="$HOME/.cache/fast_autocomplete/fast_autocomplete_$(id -u).sock"
+fi
 LOCK="${SOCKET%.sock}.lock"
 
 echo "Building release binary..."
