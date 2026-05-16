@@ -23,7 +23,8 @@ _fa_socket_path() {
     return
   fi
   local uid=${UID:-$(id -u)}
-  print -- "${TMPDIR:-/tmp/}fast_autocomplete_${uid}.sock"
+  local tmpdir=${TMPDIR:-/tmp}
+  print -- "${tmpdir%/}/fast_autocomplete_${uid}.sock"
 }
 
 _fa_bin_path() {
