@@ -12,15 +12,15 @@ mod socket;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::{Notify, RwLock};
 
 pub struct SharedState {
     pub tree: Arc<cache::CompletionTree>,
     /// All known command names, populated quickly at startup (no completion functions run).
     pub cmd_names: OnceLock<Vec<String>>,
-    /// Per-command watch channel: send(true) when harvest for that command is complete.
-    pub harvest_channels: DashMap<String, Arc<tokio::sync::watch::Sender<bool>>>,
+    /// Commands whose harvest is currently in flight; dedups concurrent JIT triggers.
+    pub harvest_in_flight: DashSet<String>,
     /// Commands whose harvest has fully completed and whose nodes are in `tree`.
     pub harvested: DashMap<String, ()>,
     pub sessions: DashMap<u64, session::SessionState>,
@@ -135,7 +135,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     let state = Arc::new(SharedState {
         tree: Arc::new(cache::CompletionTree::default()),
         cmd_names: OnceLock::new(),
-        harvest_channels: DashMap::new(),
+        harvest_in_flight: DashSet::new(),
         harvested: DashMap::new(),
         sessions: DashMap::new(),
         frecency: RwLock::new(frecency::FrecencyStore::load(&frecency_path)),

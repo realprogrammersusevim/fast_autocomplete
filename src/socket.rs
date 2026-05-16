@@ -37,15 +37,14 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
 /// Trigger a JIT harvest for `cmd` if one hasn't started yet. Returns immediately;
 /// the harvest runs in the background and populates the tree for subsequent requests.
 fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
-    if state.harvested.contains_key(cmd) || state.harvest_channels.contains_key(cmd) {
+    if state.harvested.contains_key(cmd) {
         return;
     }
-
-    let (tx, _) = tokio::sync::watch::channel(false);
-    let tx = Arc::new(tx);
-    state
-        .harvest_channels
-        .insert(cmd.to_string(), Arc::clone(&tx));
+    // `insert` returns false if the value was already present — another request
+    // already kicked off the harvest, so we bail.
+    if !state.harvest_in_flight.insert(cmd.to_string()) {
+        return;
+    }
 
     let cmd_owned = cmd.to_string();
     let state_clone = Arc::clone(state);
@@ -54,9 +53,7 @@ fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
             log::warn!("harvest_command('{cmd_owned}') failed: {e}");
         }
         state_clone.harvested.insert(cmd_owned.clone(), ());
-        let _ = tx.send(true);
-        // Free the dedup channel; `harvested` is enough to gate future requests.
-        state_clone.harvest_channels.remove(&cmd_owned);
+        state_clone.harvest_in_flight.remove(&cmd_owned);
     });
 }
 
@@ -157,14 +154,14 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dashmap::DashMap;
+    use dashmap::{DashMap, DashSet};
     use std::sync::{Arc, OnceLock};
 
     fn make_state() -> Arc<crate::SharedState> {
         Arc::new(crate::SharedState {
             tree: Arc::new(crate::cache::CompletionTree::default()),
             cmd_names: OnceLock::new(),
-            harvest_channels: DashMap::new(),
+            harvest_in_flight: DashSet::new(),
             harvested: DashMap::new(),
             sessions: DashMap::new(),
             frecency: tokio::sync::RwLock::new(crate::frecency::FrecencyStore::new()),
