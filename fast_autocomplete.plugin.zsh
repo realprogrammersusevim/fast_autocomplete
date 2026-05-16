@@ -140,13 +140,20 @@ _fast_autocomplete() {
 
   case $rc in
     2)
+      # Unchanged — reuse last list.
       (( ${#_FA_LAST_COMPLETIONS} == 0 )) && return 1
       completions=( "${_FA_LAST_COMPLETIONS[@]}" )
       ;;
     0)
       _FA_LAST_COMPLETIONS=( "${completions[@]}" )
       ;;
+    3)
+      # Empty result set — drop cached list so we don't re-offer stale items.
+      _FA_LAST_COMPLETIONS=()
+      return 1
+      ;;
     *)
+      # Daemon failure — keep cached list untouched, just fall through.
       return 1
       ;;
   esac
@@ -209,9 +216,14 @@ _fa_update_below() {
       _FA_LAST_DISPLAY=$display
       zle -M -- "$display"
       ;;
-    *)
+    3)
+      # No completions — clear the display area.
       _FA_LAST_DISPLAY=''
       zle -M ''
+      ;;
+    *)
+      # Daemon failure (rc=1) — preserve the last rendered display so a
+      # transient error doesn't blank the area mid-typing.
       ;;
   esac
 }

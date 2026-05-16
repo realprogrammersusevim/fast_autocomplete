@@ -198,7 +198,7 @@ _hv_node() {
                 *'<<HV_CA:'*'>>'*)
                     payload=${line#*<<HV_CA:}
                     payload=${payload%%>>*}
-                    _hv_parse_ca "$payload" flags subs wants
+                    _hv_parse_ca "$payload" flags subs
                     (( count++ ))
                     (( count > 64 )) && break
                     ;;
@@ -233,7 +233,7 @@ _hv_node() {
                 *'<<HV_CA:'*'>>'*)
                     payload=${line#*<<HV_CA:}
                     payload=${payload%%>>*}
-                    _hv_parse_ca "$payload" flags subs wants
+                    _hv_parse_ca "$payload" flags subs
                     (( count++ ))
                     (( count > 64 )) && break
                     ;;

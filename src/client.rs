@@ -3,6 +3,11 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+// Exit codes shared by --complete and --display:
+//   0 = results printed
+//   1 = daemon failure (connect/read/parse) — caller should preserve any previous UI
+//   2 = unchanged (caller should reuse cached results)
+//   3 = empty result set (caller should clear any previous UI)
 pub fn run_complete(socket_path: &Path) -> ! {
     let mut payload = String::new();
     let _ = io::stdin().read_to_string(&mut payload);
@@ -16,7 +21,7 @@ pub fn run_complete(socket_path: &Path) -> ! {
     }
     let completions = resp.completions;
     if completions.is_empty() {
-        std::process::exit(1);
+        std::process::exit(3);
     }
     for c in &completions {
         println!("{c}");
@@ -37,7 +42,7 @@ pub fn run_display(socket_path: &Path, columns: usize) -> ! {
     }
     let completions = resp.completions;
     if completions.is_empty() {
-        std::process::exit(1);
+        std::process::exit(3);
     }
     print!("{}", format_columns(&completions, columns));
     std::process::exit(0);
@@ -48,7 +53,21 @@ pub fn run_record(socket_path: &Path, value: &str) -> ! {
         let payload = format!("RECORD={value}\n\n");
         if let Ok(mut stream) = UnixStream::connect(socket_path) {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-            let _ = stream.write_all(payload.as_bytes());
+            if stream.write_all(payload.as_bytes()).is_ok() {
+                // Half-close to flush the write side; the daemon's read-to-EOF
+                // then guarantees the payload is delivered before we exit.
+                // Without this, a partial buffered write can be silently dropped.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                // Drain any reply (and detect close) so we don't exit before
+                // the kernel has flushed the write buffer to the peer.
+                let mut sink = [0u8; 64];
+                while let Ok(n) = stream.read(&mut sink) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }
         }
     }
     std::process::exit(0);
