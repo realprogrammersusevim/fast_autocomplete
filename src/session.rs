@@ -16,8 +16,6 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    /// Returns true if the completion list is identical to the last response sent to this session.
-    /// Updates the stored hash when the list has changed.
     pub fn is_duplicate(&mut self, completions: &[String]) -> bool {
         let mut hasher = ahash::AHasher::default();
         completions.hash(&mut hasher);

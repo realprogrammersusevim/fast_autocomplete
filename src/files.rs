@@ -1,10 +1,5 @@
 use std::path::{Path, PathBuf};
 
-/// List immediate directory entries that match the given partial path prefix.
-///
-/// Handles relative paths, absolute paths, and simple ~ expansion.
-/// Directories are returned with a trailing `/`.
-/// Hidden files are included only if `partial` starts with `.`.
 pub fn list_files(cwd: &Path, partial: &str) -> Vec<String> {
     let (dir_part, name_prefix) = match partial.rfind('/') {
         Some(i) => (&partial[..=i], &partial[i + 1..]),

@@ -17,18 +17,13 @@ use tokio::sync::{Notify, RwLock};
 
 pub struct SharedState {
     pub tree: Arc<cache::CompletionTree>,
-    /// All known command names, populated quickly at startup (no completion functions run).
     pub cmd_names: OnceLock<Vec<String>>,
-    /// Commands whose harvest is currently in flight; dedups concurrent JIT triggers.
     pub harvest_in_flight: DashSet<String>,
-    /// Commands whose harvest has fully completed and whose nodes are in `tree`.
     pub harvested: DashMap<String, ()>,
     pub sessions: DashMap<u64, session::SessionState>,
-    /// `RwLock` so concurrent score reads don't serialize. Writes (`record`) are rare —
-    /// only fire when the user actually accepts a completion.
+    /// `RwLock` so concurrent score reads don't serialize. Writes are rare.
     pub frecency: RwLock<frecency::FrecencyStore>,
-    /// Kicked when the frecency store has been mutated; a background task
-    /// debounces these kicks and persists the store to disk.
+    /// Kicked on frecency mutation; a background task debounces and persists.
     pub frecency_dirty: Notify,
 }
 
@@ -36,10 +31,7 @@ fn socket_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("FAST_AUTOCOMPLETE_SOCKET") {
         return std::path::PathBuf::from(p);
     }
-    // Use a stable, user-scoped directory so the lock/socket paths don't
-    // depend on $TMPDIR (which varies across launch contexts and would
-    // otherwise allow multiple daemons to start, each holding a flock on
-    // a different file).
+    // Stable, user-scoped dir so lock/socket paths don't vary with $TMPDIR across launch contexts.
     let uid = unsafe { libc::getuid() };
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
@@ -155,8 +147,6 @@ async fn daemon_main() -> anyhow::Result<()> {
         frecency_dirty: Notify::new(),
     });
 
-    // Debounce task: after each kick, sleep 5s (coalescing further kicks during
-    // that window) then persist the frecency store.
     {
         let state = Arc::clone(&state);
         let path = frecency_path.clone();
@@ -172,8 +162,7 @@ async fn daemon_main() -> anyhow::Result<()> {
         });
     }
 
-    // Periodically evict session entries that haven't been seen in a while.
-    // Shells come and go; without this the sessions map grows monotonically.
+    // Shells come and go; without eviction the sessions map grows monotonically.
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -189,7 +178,6 @@ async fn daemon_main() -> anyhow::Result<()> {
         });
     }
 
-    // Populate command name list quickly at startup (no completion functions run).
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -205,9 +193,7 @@ async fn daemon_main() -> anyhow::Result<()> {
 
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-    // Accept loop — exits cleanly on SIGINT or SIGTERM so that spawn_blocking
-    // threads (and their KillOnDrop child guards) run to completion instead of
-    // being abandoned by std::process::exit.
+    // Clean exit on signal so KillOnDrop guards run to completion rather than being abandoned.
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -226,7 +212,6 @@ async fn daemon_main() -> anyhow::Result<()> {
 
     let _ = std::fs::remove_file(&path);
 
-    // Final flush: persist any pending frecency updates before exit.
     {
         let mut frecency = state.frecency.write().await;
         if let Err(e) = frecency.save(&frecency_path) {

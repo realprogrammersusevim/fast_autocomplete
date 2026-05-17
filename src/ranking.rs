@@ -5,12 +5,6 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 static MATCHER: LazyLock<SkimMatcherV2> = LazyLock::new(|| SkimMatcherV2::default().smart_case());
 
-/// Merge static cache completions and file completions, fuzzy-filter, deduplicate,
-/// and sort by combined fuzzy+frecency score, then type (non-flags before flags), then alpha.
-/// Flags (items starting with `-`) are only included when `current_word` starts with `-`.
-///
-/// Inputs are slices so callers can pass cheaply-cloned `Arc<[String]>` data without copying;
-/// only the surviving items (up to 200) are allocated into the returned `Vec`.
 pub fn rank_completions(
     static_items: &[String],
     file_items: &[String],
@@ -50,7 +44,6 @@ pub fn rank_completions(
             .collect()
     };
 
-    // High score first, then non-flags before flags, then alphabetical.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)

@@ -4,14 +4,10 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-/// Decay time-constant. Score is multiplied by exp(-Δt / TAU) between events.
-/// τ = 7 days → an unused entry retains ~37% of its score after a week,
-/// ~13% after two weeks, ~0.5% after a month.
+// Score *= exp(-Δt / TAU) between events.
 const TAU: Duration = Duration::from_secs(7 * 86_400);
 
-/// Compaction thresholds: an entry is dropped on save when its decayed
-/// score is below this AND it has been idle for longer than the idle cutoff.
-/// Both must hold so brand-new low-score entries aren't pruned immediately.
+// Both conditions must hold so brand-new low-score entries aren't pruned immediately.
 const PRUNE_SCORE: f64 = 0.05;
 const PRUNE_IDLE: Duration = Duration::from_secs(30 * 86_400);
 
@@ -59,9 +55,6 @@ impl FrecencyStore {
         decay(entry.score, age)
     }
 
-    /// Drop entries whose decayed score has fallen below `PRUNE_SCORE` and
-    /// have been idle for longer than `PRUNE_IDLE`. Called on every save so
-    /// the on-disk file (and the in-memory map after load) stays bounded.
     fn compact(&mut self) {
         let now = SystemTime::now();
         self.entries.retain(|_, entry| {
@@ -70,8 +63,6 @@ impl FrecencyStore {
         });
     }
 
-    /// Load from disk. Returns an empty store if the file does not exist or is
-    /// unreadable / corrupt — the on-disk format is best-effort, not load-bearing.
     pub fn load(path: &Path) -> Self {
         let Ok(bytes) = std::fs::read(path) else {
             return Self::new();

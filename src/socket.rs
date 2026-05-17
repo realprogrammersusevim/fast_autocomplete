@@ -5,7 +5,6 @@ use tokio::net::UnixStream;
 use crate::protocol::{Request, Response};
 use crate::{SharedState, files, harvester, ranking};
 
-/// Handle one incoming connection: read a single request block, respond, close.
 pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -34,14 +33,10 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<SharedState>) {
     }
 }
 
-/// Trigger a JIT harvest for `cmd` if one hasn't started yet. Returns immediately;
-/// the harvest runs in the background and populates the tree for subsequent requests.
 fn ensure_harvested(cmd: &str, state: &Arc<SharedState>) {
     if state.harvested.contains_key(cmd) {
         return;
     }
-    // `insert` returns false if the value was already present — another request
-    // already kicked off the harvest, so we bail.
     if !state.harvest_in_flight.insert(cmd.to_string()) {
         return;
     }
@@ -69,14 +64,10 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     let parsed = crate::parser::parse_buffer(&req.buffer, req.cursor);
     let cwd = std::path::Path::new(&req.cwd);
 
-    // JIT: trigger harvest for the top-level command if not yet done.
     if let Some(cmd) = parsed.lookup_words.first() {
         ensure_harvested(cmd, state);
     }
 
-    // Static items as up to two slices — flags and subcommands are stored
-    // behind `Arc<[String]>` in `CompletionTree`, so we clone the Arc (one
-    // atomic op) instead of copying every String.
     let (flags, subs, wants_files, cmd_fallback) = if parsed.lookup_words.is_empty() {
         // Completing the command name itself — return all known command names.
         let cmds = match state.cmd_names.get() {
@@ -114,9 +105,6 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         vec![]
     };
 
-    // Merge static items into one slice for ranking. We allocate a single
-    // `Vec<String>` here only if both flags and subcommands are non-empty; in
-    // the common case (one of them empty), we pass the non-empty slice directly.
     let static_buf: Vec<String>;
     let static_slice: &[String] = if !cmd_slice.is_empty() {
         cmd_slice
@@ -133,9 +121,6 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
         &static_buf
     };
 
-    // Hold the read lock across ranking so we don't snapshot scores into a
-    // HashMap upfront. Read locks don't block other readers, and `record`
-    // writes are rare (only on tab acceptance).
     let frecency = state.frecency.read().await;
     let completions =
         ranking::rank_completions(static_slice, &file_items, &parsed.current_word, |s| {

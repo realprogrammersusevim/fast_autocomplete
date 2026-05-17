@@ -6,9 +6,7 @@ pub struct ParsedBuffer {
 }
 
 pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
-    // zsh's $CURSOR counts characters, not bytes, so interpret `cursor` as a
-    // char offset. Take up to `cursor` chars and recover the byte slice from
-    // the next char boundary (or end of string).
+    // zsh $CURSOR is a char offset, not a byte offset.
     let byte_end = buffer
         .char_indices()
         .nth(cursor)

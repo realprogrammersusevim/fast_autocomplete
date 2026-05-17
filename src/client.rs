@@ -3,11 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-// Exit codes shared by --complete and --display:
-//   0 = results printed
-//   1 = daemon failure (connect/read/parse) — caller should preserve any previous UI
-//   2 = unchanged (caller should reuse cached results)
-//   3 = empty result set (caller should clear any previous UI)
+// Exit codes: 0=results, 1=daemon failure, 2=unchanged, 3=empty.
 pub fn run_complete(socket_path: &Path) -> ! {
     let mut payload = String::new();
     let _ = io::stdin().read_to_string(&mut payload);
@@ -54,13 +50,9 @@ pub fn run_record(socket_path: &Path, value: &str) -> ! {
         if let Ok(mut stream) = UnixStream::connect(socket_path) {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
             if stream.write_all(payload.as_bytes()).is_ok() {
-                // Half-close to flush the write side; the daemon's read-to-EOF
-                // then guarantees the payload is delivered before we exit.
-                // Without this, a partial buffered write can be silently dropped.
+                // Shutdown write then drain: guarantees delivery before exit.
                 let _ = stream.shutdown(std::net::Shutdown::Write);
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                // Drain any reply (and detect close) so we don't exit before
-                // the kernel has flushed the write buffer to the peer.
                 let mut sink = [0u8; 64];
                 while let Ok(n) = stream.read(&mut sink) {
                     if n == 0 {
@@ -107,7 +99,6 @@ fn format_columns(completions: &[String], term_width: usize) -> String {
     let mut output = String::new();
     for (i, c) in shown.iter().enumerate() {
         output.push_str(c);
-        // Right-pad to col_width (matches zsh `${(r:col_width:)c}`)
         for _ in c.len()..col_width {
             output.push(' ');
         }
@@ -116,7 +107,6 @@ fn format_columns(completions: &[String], term_width: usize) -> String {
         }
     }
 
-    // Remove trailing newline (matches zsh `${output%$'\n'}`)
     if output.ends_with('\n') {
         output.pop();
     }

@@ -5,12 +5,10 @@ pub struct Request {
     pub cursor: usize,
     pub cwd: String,
     pub session: u64,
-    /// Set when the client is reporting an accepted completion for frecency recording.
     pub record: Option<String>,
 }
 
 impl Request {
-    /// Parse a key=value block (lines terminated by `\n\n`).
     pub fn parse(input: &str) -> Self {
         let mut map: HashMap<&str, &str> = HashMap::new();
         for line in input.lines() {

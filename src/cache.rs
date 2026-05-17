@@ -23,8 +23,6 @@ fn empty_arc() -> Arc<[String]> {
 }
 
 impl CompletionTree {
-    /// Walk words to find the deepest matching node; returns Arc-shared (flags, subcommands, `wants_files`).
-    /// `Arc::clone` is cheap (one atomic op) — no per-call cloning of every String.
     #[allow(clippy::significant_drop_tightening)] // root guard must live for the full borrow chain
     #[allow(clippy::type_complexity)]
     pub fn lookup(&self, words: &[&str]) -> Option<(Arc<[String]>, Arc<[String]>, bool)> {
@@ -52,7 +50,6 @@ impl CompletionTree {
         ))
     }
 
-    /// Insert a node at the given path, creating intermediate nodes as needed.
     #[allow(clippy::significant_drop_tightening)] // DashMap entry guards must live for the full mutation
     pub fn insert(
         &self,

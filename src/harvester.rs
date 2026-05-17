@@ -6,8 +6,6 @@ use crate::cache::CompletionTree;
 
 const HARVESTER_SCRIPT: &str = include_str!("../scripts/harvester.zsh");
 
-/// Lightweight script: emits one command name per line from zsh's completion table.
-/// No completion functions are called, so this completes in a few seconds.
 const LIST_COMMANDS_SCRIPT: &str = r#"emulate -L zsh
 setopt extendedglob nullglob no_aliases
 autoload -Uz compinit
@@ -132,8 +130,6 @@ const ZSH_BUILTINS: &[&str] = &[
     "zstyle",
 ];
 
-/// Return the sorted list of all known command names without running any completion functions.
-/// Intended to run once at startup in a `spawn_blocking` task.
 pub fn list_commands() -> anyhow::Result<Vec<String>> {
     let script_path = std::env::temp_dir().join("fast_ac_list_cmds.zsh");
     std::fs::write(&script_path, LIST_COMMANDS_SCRIPT)?;
@@ -156,9 +152,6 @@ pub fn list_commands() -> anyhow::Result<Vec<String>> {
     Ok(cmds)
 }
 
-/// Harvest completions for a single command and insert the results into `tree`.
-/// Passes the command name as `$1` to the harvester script (JIT mode).
-/// Intended to run in a `spawn_blocking` task.
 pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
     // KillOnDrop ensures every spawned process is reaped on every exit path
     // (normal return, early error, panic), preventing CPU-burning orphans.
@@ -187,10 +180,7 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         }
     }
 
-    // Hard cap on nodes ingested per command. Real-world harvests emit at most a
-    // few hundred; anything larger is a pathological completion definition (or
-    // a runaway recursion) and would balloon the tree without improving UX.
-    // The KillOnDrop guard on `child` reaps the subprocess once we break.
+    // Anything beyond this is a pathological/runaway completion definition.
     const MAX_NODES: usize = 5_000;
 
     let script_path = std::env::temp_dir().join("fast_ac_harvester.zsh");
@@ -243,21 +233,14 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         }
     }
 
-    // Guard drops here: sweeps descendants, killpg's the parent's group,
-    // then reaps the parent.
     drop(guard);
     log::debug!("harvested {count} nodes for '{cmd}'");
     Ok(())
 }
 
-/// Recursively SIGKILL all descendants of `pid` (children, grandchildren, ...).
-/// Used by `KillOnDrop` to reach grandchildren in their own process sessions —
-/// notably the `zpty` worker, which `setsid()`s itself out of the parent's
-/// process group and so escapes a plain `killpg(parent_pgid)`.
-///
-/// Uses `pgrep -P` because no portable libc call enumerates children, and
-/// walking `/proc` doesn't work on macOS. `pgrep` is in `/usr/bin` on macOS
-/// and base on every Linux distro that ships a daemon like this.
+/// Recursively SIGKILL all descendants of `pid`.
+/// Needed because the `zpty` worker calls `setsid()` and escapes a plain `killpg`.
+/// Uses `pgrep -P`: no portable libc alternative works on both macOS and Linux.
 fn kill_tree(pid: i32) {
     let output = match Command::new("pgrep")
         .args(["-P", &pid.to_string()])
