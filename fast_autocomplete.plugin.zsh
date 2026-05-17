@@ -12,7 +12,6 @@
 # functions called later from subshells (where %x/%0 lose their file context).
 _FA_PLUGIN_DIR=${0:A:h}
 
-# Launch the daemon detached from the current shell.
 _fa_launch() {
   ( nohup "$1" </dev/null &>/dev/null & )
 }
@@ -80,7 +79,6 @@ _fa_alias_expand() {
   local before="${buffer:0:$cursor}" after="${buffer:$cursor}"
   local first_word="${before%% *}"
 
-  # Only expand when the command word is done (space follows it).
   if [[ $before != $first_word' '* ]]; then
     print -- "$cursor"
     print -r -- "$buffer"
@@ -199,6 +197,7 @@ _fa_update_below() {
   local _fa_cursor=${_fa_exp[1]} _fa_buffer=${_fa_exp[2]}
 
   local payload
+  # Offset session ID so display and Tab completion use independent unchanged-detection state.
   payload=$(printf 'BUFFER=%s\nCURSOR=%d\nCWD=%s\nSESSION=%d\n\n' \
     "$_fa_buffer" "$_fa_cursor" "$PWD" "$(( $$ + 1000000 ))")
 
@@ -271,14 +270,12 @@ _fa_bind_shift_tab
 #  Plugin setup                                                                 #
 # --------------------------------------------------------------------------- #
 
-# Register _fast_autocomplete as the first completer.
 zstyle ':completion:*' completer _fast_autocomplete _complete _files
 
 # Cache the binary path at load time so hot paths don't re-resolve it.
 typeset -g _FA_BIN
 _FA_BIN=$(_fa_bin_path)
 
-# Kick off the daemon if the socket is absent.
 if [[ -n $_FA_BIN && ! -S $(_fa_socket_path) ]]; then
   _fa_launch "$_FA_BIN"
 fi

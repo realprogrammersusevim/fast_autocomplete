@@ -139,10 +139,6 @@ _hv_probe() {
     zpty -w -n _hv $'\x15'
     zpty -w _hv "print $mark"
     _HV_RAW=""
-    # Blocking read; zsh's zpty -r caps at 1MB so this can never read forever
-    # even when a completer (e.g. _man) emits hundreds of KB and the mark gets
-    # buried. The parser-side payload guard in _hv_parse_ca then skips any
-    # capture larger than 8KB, so we don't recurse on noisy enumerations.
     zpty -r _hv _HV_RAW "*${mark}*" 2>/dev/null
 }
 
@@ -254,7 +250,6 @@ _hv_node() {
         done <<< "$_HV_RAW"
     fi
 
-    # Cap each list to avoid pathological output.
     if (( ${#flags} > MAX_ITEMS_PER_NODE )); then
         flags=("${flags[@]:0:$MAX_ITEMS_PER_NODE}")
     fi
