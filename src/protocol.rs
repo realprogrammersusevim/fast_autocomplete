@@ -36,8 +36,6 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<Vec<String>>,
     pub unchanged: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<&'static str>,
 }
 
 impl Response {
@@ -45,7 +43,6 @@ impl Response {
         Self {
             completions: None,
             unchanged: true,
-            error: None,
         }
     }
 
@@ -53,16 +50,6 @@ impl Response {
         Self {
             completions: Some(completions),
             unchanged: false,
-            error: None,
-        }
-    }
-
-    #[allow(dead_code)] // used in tests; not currently needed from binary code paths
-    pub const fn error(msg: &'static str) -> Self {
-        Self {
-            completions: None,
-            unchanged: false,
-            error: Some(msg),
         }
     }
 }
@@ -147,14 +134,6 @@ mod tests {
         assert!(json.contains("\"add\""));
         assert!(json.contains("\"unchanged\":false"));
         assert!(!json.contains("\"error\""));
-    }
-
-    #[test]
-    fn test_response_error_serialization() {
-        let json = serde_json::to_string(&Response::error("parse_error")).unwrap();
-        assert!(json.contains("\"error\":\"parse_error\""));
-        assert!(json.contains("\"unchanged\":false"));
-        assert!(!json.contains("\"completions\""));
     }
 
     #[test]
