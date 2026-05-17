@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use crate::cache::CompletionTree;
@@ -159,12 +160,29 @@ pub fn list_commands() -> anyhow::Result<Vec<String>> {
 /// Passes the command name as `$1` to the harvester script (JIT mode).
 /// Intended to run in a `spawn_blocking` task.
 pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
-    // KillOnDrop ensures the child is killed and waited on every exit path
-    // (normal return, early error, panic), preventing zombie processes.
+    // KillOnDrop ensures every spawned process is reaped on every exit path
+    // (normal return, early error, panic), preventing CPU-burning orphans.
+    //
+    // The process tree we spawn looks like:
+    //   parent zsh (this Child) — own pgid via process_group(0) below
+    //     ├─ wall-clock watchdog subshell (`&!`-disowned) — same pgid
+    //     └─ zpty intermediate process — same pgid
+    //         └─ `zsh -if` worker — OWN session via zpty's setsid()
+    //
+    // A plain `child.kill()` only signals the parent zsh; the worker's
+    // controlling-tty hangup *usually* delivers SIGHUP, but a worker stuck
+    // in a CPU-bound completion function won't notice until that function
+    // returns — potentially never. Killpg on the parent's pgid catches the
+    // watchdog but NOT the worker (different session).
+    //
+    // So we sweep the parent's child tree first (recursively SIGKILLing
+    // every descendant, including the setsid'd worker), then killpg the
+    // parent's pgid for any same-group stragglers, then reap the parent.
     struct KillOnDrop(std::process::Child);
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = self.0.kill();
+            kill_tree(self.0.id() as i32);
+            unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL) };
             let _ = self.0.wait();
         }
     }
@@ -178,16 +196,17 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
     let script_path = std::env::temp_dir().join("fast_ac_harvester.zsh");
     std::fs::write(&script_path, HARVESTER_SCRIPT)?;
 
-    let mut child = KillOnDrop(
+    let mut guard = KillOnDrop(
         Command::new("zsh")
             .arg(&script_path)
             .arg(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .process_group(0)
             .spawn()?,
     );
 
-    let stdout = child
+    let stdout = guard
         .0
         .stdout
         .take()
@@ -224,8 +243,40 @@ pub fn harvest_command(cmd: &str, tree: &CompletionTree) -> anyhow::Result<()> {
         }
     }
 
-    // child guard drops here: kills if still running, then waits to reap.
-    drop(child);
+    // Guard drops here: sweeps descendants, killpg's the parent's group,
+    // then reaps the parent.
+    drop(guard);
     log::debug!("harvested {count} nodes for '{cmd}'");
     Ok(())
+}
+
+/// Recursively SIGKILL all descendants of `pid` (children, grandchildren, ...).
+/// Used by `KillOnDrop` to reach grandchildren in their own process sessions —
+/// notably the `zpty` worker, which `setsid()`s itself out of the parent's
+/// process group and so escapes a plain `killpg(parent_pgid)`.
+///
+/// Uses `pgrep -P` because no portable libc call enumerates children, and
+/// walking `/proc` doesn't work on macOS. `pgrep` is in `/usr/bin` on macOS
+/// and base on every Linux distro that ships a daemon like this.
+fn kill_tree(pid: i32) {
+    let output = match Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    for line in output.stdout.split(|&b| b == b'\n') {
+        let s = match std::str::from_utf8(line) {
+            Ok(s) => s.trim(),
+            Err(_) => continue,
+        };
+        if let Ok(child) = s.parse::<i32>() {
+            // Recurse first so leaves die before we kill the parent that
+            // would otherwise re-parent them to init mid-sweep.
+            kill_tree(child);
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+    }
 }

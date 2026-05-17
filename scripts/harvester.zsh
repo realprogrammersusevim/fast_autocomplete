@@ -27,8 +27,11 @@ local MAX_ITEMS_PER_NODE=500
 # `_brew` listing every formula) can spend several seconds inside a single
 # `zpty -r`, which is uninterruptible — SIGALRM/TRAPALRM don't fire while it
 # blocks. Cooperative checks between probes (see _hv_node) bound the recursive
-# fan-out. As a hard backstop, fork a watchdog that SIGKILLs us if even the
-# first probe never returns.
+# fan-out. As a hard backstop, a watchdog SIGKILLs $$ if even the first probe
+# never returns. When $$ dies the EXIT trap below runs `zpty -d _hv`, which
+# tears down the worker. On SIGKILL traps don't run, so for that path the
+# Rust parent uses a process-group + child-tree sweep to reach the worker —
+# see harvest_command's KillOnDrop in src/harvester.rs.
 local MAX_ELAPSED_SECONDS=15
 
 (
@@ -82,6 +85,16 @@ _hv_send_sync() {
     zpty -r _hv _drain "*${mark}*" || return 1
     return 0
 }
+
+# Cleanup trap: tears down the zpty worker on every graceful exit path
+# (normal completion, SIGINT/SIGTERM/SIGHUP). SIGKILL bypasses traps — that
+# path is covered by the Rust parent's process-tree sweep on KillOnDrop.
+# Without this trap, a signal-driven exit would leave the worker as a
+# session-leader orphan.
+_hv_cleanup() {
+    zpty -d _hv 2>/dev/null
+}
+trap _hv_cleanup EXIT INT TERM HUP
 
 _hv_send_sync "PROMPT='' RPROMPT='' PS2='' SPROMPT=''" || exit 1
 _hv_send_sync "unsetopt BEEP LIST_BEEP CORRECT CORRECT_ALL AUTO_LIST AUTO_MENU MENU_COMPLETE LIST_AMBIGUOUS PROMPT_CR PROMPT_SP" || exit 1
@@ -290,4 +303,4 @@ _hv_node() {
 
 _hv_node "$TARGET"
 
-zpty -d _hv 2>/dev/null
+_hv_cleanup
