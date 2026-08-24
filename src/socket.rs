@@ -56,7 +56,13 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
     let req = Request::parse(raw);
 
     if let Some(value) = req.record {
-        state.frecency.write().await.record(&value);
+        // Plugin echoes the token from $BUFFER, which carries our escapes; strip
+        // them so the frecency key matches what ranking scores against.
+        let canonical = crate::parser::split_shell_words(&value)
+            .into_iter()
+            .next()
+            .unwrap_or(value);
+        state.frecency.write().await.record(&canonical);
         state.frecency_dirty.notify_one();
         return Response::unchanged();
     }
@@ -127,6 +133,13 @@ async fn process_request(raw: &str, state: &Arc<SharedState>) -> Response {
             frecency.score(s)
         });
     drop(frecency);
+
+    // Escape after ranking — the plugin inserts these verbatim via `compadd -Q -U`,
+    // so unescaped whitespace/metachars would re-tokenize the command line.
+    let completions: Vec<String> = completions
+        .into_iter()
+        .map(|s| crate::parser::escape_for_shell(&s))
+        .collect();
 
     let mut session = state.sessions.entry(req.session).or_default();
     session.last_seen = std::time::Instant::now();
@@ -266,6 +279,35 @@ mod tests {
         assert!(state.frecency.read().await.score("commit") > 0.0);
         // Unrelated item is unchanged.
         assert_eq!(state.frecency.read().await.score("push"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_file_with_space_is_escaped_in_response() {
+        let state = make_state();
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        std::fs::File::create(tmpdir.path().join("my docs.txt")).unwrap();
+        let req = format!(
+            "BUFFER=cat \nCURSOR=4\nCWD={}\nSESSION=7\n",
+            tmpdir.path().display()
+        );
+        let response = process_request(&req, &state).await;
+        let completions = response.completions.unwrap_or_default();
+        assert!(
+            completions.contains(&"my\\ docs.txt".to_string()),
+            "expected escaped filename in {completions:?}"
+        );
+        // The unescaped form must NOT leak through.
+        assert!(!completions.contains(&"my docs.txt".to_string()));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::float_cmp)]
+    async fn test_record_unescapes_before_storing() {
+        let state = make_state();
+        let response = process_request("RECORD=my\\ docs.txt\n\n", &state).await;
+        assert!(response.unchanged);
+        assert!(state.frecency.read().await.score("my docs.txt") > 0.0);
+        assert_eq!(state.frecency.read().await.score("my\\ docs.txt"), 0.0);
     }
 
     #[tokio::test]

@@ -30,6 +30,26 @@ pub fn parse_buffer(buffer: &str, cursor: usize) -> ParsedBuffer {
     }
 }
 
+/// Backslash-escape shell metacharacters. `~` and `/` are left alone so tilde
+/// expansion and path separators survive insertion.
+pub fn escape_for_shell(s: &str) -> String {
+    const SPECIAL: &[char] = &[
+        ' ', '\t', '\n', '"', '\'', '\\', '$', '`', '*', '?', '[', ']', '(', ')', '{', '}', '<',
+        '>', '|', '&', ';', '!', '#',
+    ];
+    if !s.chars().any(|c| SPECIAL.contains(&c)) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if SPECIAL.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Split a shell command line into words, respecting single/double quotes and backslash escapes.
 pub fn split_shell_words(s: &str) -> Vec<String> {
     enum State {
@@ -196,6 +216,37 @@ mod tests {
         let p = parse_buffer("echo café", 7);
         assert_eq!(p.lookup_words, vec!["echo"]);
         assert_eq!(p.current_word, "ca");
+    }
+
+    #[test]
+    fn test_escape_for_shell_noop_on_plain() {
+        assert_eq!(escape_for_shell("foo"), "foo");
+        assert_eq!(escape_for_shell("--verbose"), "--verbose");
+        assert_eq!(escape_for_shell("~/path/file"), "~/path/file");
+    }
+
+    #[test]
+    fn test_escape_for_shell_spaces() {
+        assert_eq!(escape_for_shell("my docs/"), r"my\ docs/");
+        assert_eq!(escape_for_shell("a b c"), r"a\ b\ c");
+    }
+
+    #[test]
+    fn test_escape_for_shell_metachars() {
+        assert_eq!(escape_for_shell("foo;bar"), r"foo\;bar");
+        assert_eq!(escape_for_shell("$HOME"), r"\$HOME");
+        assert_eq!(escape_for_shell("a&b"), r"a\&b");
+        assert_eq!(escape_for_shell("a*b"), r"a\*b");
+    }
+
+    #[test]
+    fn test_escape_roundtrips_through_split() {
+        let cases = ["my docs/", "weird;name", "a$b", "a b c", "foo!bar"];
+        for original in cases {
+            let escaped = escape_for_shell(original);
+            let words = split_shell_words(&escaped);
+            assert_eq!(words, vec![original.to_string()], "case: {original:?}");
+        }
     }
 
     #[test]
